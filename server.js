@@ -172,7 +172,8 @@ app.get('/api/stream-proxy', async (req, res) => {
   const abortController = new AbortController();
   req.on('close', () => abortController.abort());
 
-  // Helper: spawn ffmpeg to transcode a URL directly to fragmented MP4
+  // Helper: fast remux — copy streams as-is into fragmented MP4 (no re-encoding)
+  // Works for H.264/AAC MPEG-TS streams (most IPTV). Much faster than transcoding.
   function spawnFfmpeg(url) {
     return spawn(FFMPEG, [
       '-reconnect', '1',
@@ -180,8 +181,8 @@ app.get('/api/stream-proxy', async (req, res) => {
       '-reconnect_delay_max', '5',
       '-user_agent', headers['User-Agent'],
       '-i', url,
-      '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency',
-      '-c:a', 'aac', '-b:a', '128k',
+      '-c:v', 'copy',          // copy video — no re-encode (fast!)
+      '-c:a', 'aac', '-b:a', '128k', // convert audio to AAC (browser-safe)
       '-f', 'mp4', '-movflags', 'frag_keyframe+empty_moov',
       'pipe:1',
     ]);
