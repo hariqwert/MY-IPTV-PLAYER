@@ -232,7 +232,12 @@ app.get('/api/stream-proxy', async (req, res) => {
 
     if (forceTranscode) {
       args.push(
-        '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency',
+        '-c:v', 'libx264',
+        '-preset', 'ultrafast',
+        '-tune', 'zerolatency',
+        '-crf', '28',
+        '-g', '50',
+        '-vf', 'yadif,scale=-2:480',
         '-c:a', 'aac', '-b:a', '128k'
       );
     } else {
