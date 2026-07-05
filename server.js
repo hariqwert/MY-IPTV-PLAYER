@@ -14,9 +14,19 @@ app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
 const PORT = process.env.PORT || 8080;
-// Use absolute path so ffmpeg works even before shell PATH is refreshed after winget install
-const defaultWinPath = 'C:\\Users\\HP\\AppData\\Local\\Microsoft\\WinGet\\Packages\\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\\ffmpeg-8.1.2-full_build\\bin\\ffmpeg.exe';
-const FFMPEG = process.env.FFMPEG_PATH || (fs.existsSync(defaultWinPath) ? defaultWinPath : 'ffmpeg');
+let FFMPEG = process.env.FFMPEG_PATH;
+if (!FFMPEG) {
+  const defaultWinPath = 'C:\\Users\\HP\\AppData\\Local\\Microsoft\\WinGet\\Packages\\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\\ffmpeg-8.1.2-full_build\\bin\\ffmpeg.exe';
+  if (fs.existsSync(defaultWinPath)) {
+    FFMPEG = defaultWinPath;
+  } else {
+    try {
+      FFMPEG = require('@ffmpeg-installer/ffmpeg').path;
+    } catch (e) {
+      FFMPEG = 'ffmpeg';
+    }
+  }
+}
 const CONNECT_TIMEOUT_MS = 30000;
 const IDLE_TIMEOUT_MS = 30000;
 
