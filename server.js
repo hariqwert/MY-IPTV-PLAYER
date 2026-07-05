@@ -59,9 +59,9 @@ async function resolveUrlToIp(urlStr) {
       return { url: urlStr, hostHeader: null, originalHost: hostname };
     }
 
-    const addresses = await dns.resolve4(hostname);
-    if (addresses && addresses.length > 0) {
-      const ip = addresses[0];
+    const lookup = await dns.lookup(hostname);
+    if (lookup && lookup.address) {
+      const ip = lookup.address;
       const port = parsed.port ? `:${parsed.port}` : '';
       parsed.host = `${ip}${port}`;
       return {
