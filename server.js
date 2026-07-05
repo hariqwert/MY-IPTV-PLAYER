@@ -23,7 +23,7 @@ if (!FFMPEG) {
     FFMPEG = defaultWinPath;
   } else {
     try {
-      FFMPEG = require('@ffmpeg-installer/ffmpeg').path;
+      FFMPEG = require('ffmpeg-static');
     } catch (e) {
       FFMPEG = 'ffmpeg';
     }
