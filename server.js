@@ -23,18 +23,8 @@ if (!FFMPEG) {
     FFMPEG = defaultWinPath;
   } else {
     try {
-      const staticPath = require('ffmpeg-static');
-      if (staticPath && fs.existsSync(staticPath)) {
-        FFMPEG = staticPath;
-        if (process.platform !== 'win32') {
-          const { execSync } = require('child_process');
-          try { execSync(`chmod +x "${FFMPEG}"`); } catch (err) { console.error('Failed to chmod ffmpeg:', err.message); }
-        }
-      } else {
-        FFMPEG = 'ffmpeg';
-      }
+      FFMPEG = require('@ffmpeg-installer/ffmpeg').path;
     } catch (e) {
-      console.error('Failed to load ffmpeg-static:', e.message);
       FFMPEG = 'ffmpeg';
     }
   }
