@@ -15,7 +15,7 @@ app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
 const PORT = process.env.PORT || 8080;
-const FFMPEG_STARTUP_TIMEOUT_MS = 12000; // kill ffmpeg if no data in 12s
+const FFMPEG_STARTUP_TIMEOUT_MS = 20000; // kill ffmpeg if no data in 20s
 let FFMPEG = process.env.FFMPEG_PATH;
 if (!FFMPEG) {
   const defaultWinPath = 'C:\\Users\\HP\\AppData\\Local\\Microsoft\\WinGet\\Packages\\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\\ffmpeg-8.1.2-full_build\\bin\\ffmpeg.exe';
@@ -29,8 +29,8 @@ if (!FFMPEG) {
     }
   }
 }
-const CONNECT_TIMEOUT_MS = 8000;
-const IDLE_TIMEOUT_MS = 30000;
+const CONNECT_TIMEOUT_MS = 20000;
+const IDLE_TIMEOUT_MS = 15000;
 
 // Log resolved ffmpeg path on startup
 console.log('[ffmpeg] resolved path:', FFMPEG);
@@ -363,177 +363,6 @@ app.get('/api/stream-proxy', async (req, res) => {
     console.error('Stream proxy error:', e.message);
     res.status(502).send('Proxy error: ' + e.message);
   }
-});
-
-// Diagnostic endpoint to check ffmpeg execution and network status
-app.get('/api/diagnose', async (req, res) => {
-  const diagnosis = {
-    ffmpegPath: FFMPEG,
-    ffmpegExists: false,
-    ffmpegVersion: null,
-    ffmpegError: null,
-    providerReachability: null,
-    dnsTest: null,
-    dryRun: null
-  };
-
-  try {
-    diagnosis.ffmpegExists = fs.existsSync(FFMPEG) || FFMPEG === 'ffmpeg';
-  } catch (e) {
-    diagnosis.ffmpegError = e.message;
-  }
-
-  if (diagnosis.ffmpegExists) {
-    try {
-      const { execSync } = require('child_process');
-      const versionOut = execSync(`"${FFMPEG}" -version`).toString();
-      diagnosis.ffmpegVersion = versionOut.split('\n')[0];
-    } catch (e) {
-      diagnosis.ffmpegError = `Execution failed: ${e.message}`;
-    }
-  }
-
-  try {
-    const testUrl = 'http://fastshare1.com';
-    const start = Date.now();
-    const controller = new AbortController();
-    const t = setTimeout(() => controller.abort(), 5000);
-    const testRes = await fetch(testUrl, { method: 'HEAD', signal: controller.signal, headers: { 'User-Agent': 'VLC/3.0.18' } });
-    clearTimeout(t);
-    diagnosis.providerReachability = {
-      url: testUrl,
-      status: testRes.status,
-      ok: testRes.ok,
-      timeMs: Date.now() - start
-    };
-  } catch (e) {
-    diagnosis.providerReachability = {
-      ok: false,
-      error: e.message
-    };
-  }
-
-  // Support dry-running a stream URL to inspect ffmpeg logs
-  const testStreamUrl = req.query.url;
-  const useSimple = req.query.simple === 'true';
-  let resolvedUrlObj = { url: testStreamUrl, hostHeader: null, originalHost: null };
-  if (testStreamUrl) {
-    try {
-      const parsed = new URL(testStreamUrl);
-      const lookup = await dns.lookup(parsed.hostname);
-      diagnosis.dnsTest = { hostname: parsed.hostname, lookup };
-    } catch (e) {
-      diagnosis.dnsTest = { hostname: new URL(testStreamUrl).hostname, error: e.message };
-    }
-
-    resolvedUrlObj = await resolveUrlToIp(testStreamUrl);
-    // 1. Check direct fetch of the stream URL from Render server
-    try {
-      const start = Date.now();
-      const controller = new AbortController();
-      const t = setTimeout(() => controller.abort(), 6000);
-      const response = await fetch(testStreamUrl, {
-        method: 'GET',
-        headers: {
-          'User-Agent': 'VLC/3.0.18',
-          'Accept': '*/*'
-        },
-        signal: controller.signal
-      });
-      clearTimeout(t);
-      diagnosis.streamFetch = {
-        status: response.status,
-        ok: response.ok,
-        contentType: response.headers.get('content-type'),
-        contentLength: response.headers.get('content-length'),
-        headers: Object.fromEntries(response.headers.entries()),
-        timeMs: Date.now() - start
-      };
-    } catch (e) {
-      diagnosis.streamFetch = {
-        ok: false,
-        error: e.message
-      };
-    }
-  }
-
-  if (testStreamUrl && diagnosis.ffmpegExists) {
-    try {
-      const { spawn } = require('child_process');
-      
-      const hostHeaders = resolvedUrlObj.hostHeader || `Host: ${resolvedUrlObj.originalHost || 'fastshare1.com'}\r\n`;
-      const fullHeaders = hostHeaders + `User-Agent: VLC/3.0.18 LibVLC/3.0.18\r\nAccept: */*\r\n`;
-
-      const dryRunArgs = [
-        '-reconnect', '1',
-        '-reconnect_streamed', '1',
-        '-reconnect_delay_max', '5',
-        '-headers', fullHeaders,
-      ];
-
-      if (resolvedUrlObj.isHttps && resolvedUrlObj.originalHost) {
-        dryRunArgs.push(
-          '-tls_host', resolvedUrlObj.originalHost,
-          '-tls_verify', '0'
-        );
-      }
-
-      dryRunArgs.push(
-        '-fflags', '+genpts+nobuffer',
-        '-flags', '+low_delay',
-        '-analyzeduration', '1000000',
-        '-probesize', '1000000',
-        '-i', resolvedUrlObj.url
-      );
-
-      const ffmpegArgs = useSimple ? [
-        '-headers', fullHeaders,
-        ...(resolvedUrlObj.isHttps ? ['-tls_host', resolvedUrlObj.originalHost, '-tls_verify', '0'] : []),
-        '-i', resolvedUrlObj.url,
-        '-c:v', 'copy',
-        '-c:a', 'aac', '-b:a', '128k',
-        '-f', 'mp4', '-movflags', 'frag_keyframe+empty_moov',
-        'pipe:1'
-      ] : [
-        ...dryRunArgs,
-        '-c:v', 'copy',
-        '-c:a', 'aac', '-b:a', '128k',
-        '-f', 'mp4', '-movflags', 'frag_keyframe+empty_moov',
-        'pipe:1'
-      ];
-
-      const child = spawn(FFMPEG, ffmpegArgs);
-
-      let dryStderr = '';
-      let dryBytes = 0;
-      child.stderr.on('data', (d) => { dryStderr += d.toString(); });
-      child.stdout.on('data', (d) => { dryBytes += d.length; });
-
-      await new Promise((resolve) => {
-        const timeout = setTimeout(() => {
-          try { child.kill('SIGKILL'); } catch {}
-          resolve();
-        }, 4000); // Run for 4 seconds
-        child.on('close', () => {
-          clearTimeout(timeout);
-          resolve();
-        });
-      });
-
-      diagnosis.dryRun = {
-        url: testStreamUrl,
-        stdoutBytes: dryBytes,
-        stderr: dryStderr
-      };
-    } catch (e) {
-      diagnosis.dryRun = {
-        url: testStreamUrl,
-        error: e.message
-      };
-    }
-  }
-
-  res.json(diagnosis);
 });
 
 app.listen(PORT, () => console.log(`IPTV player running at http://localhost:${PORT}`));
