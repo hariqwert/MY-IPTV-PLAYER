@@ -30,7 +30,7 @@ if (!FFMPEG) {
   }
 }
 const CONNECT_TIMEOUT_MS = 20000;
-const IDLE_TIMEOUT_MS = 15000;
+const IDLE_TIMEOUT_MS = 60000;
 
 // Log resolved ffmpeg path on startup
 console.log('[ffmpeg] resolved path:', FFMPEG);
