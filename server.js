@@ -360,6 +360,7 @@ app.get('/api/diagnose', async (req, res) => {
     ffmpegVersion: null,
     ffmpegError: null,
     providerReachability: null,
+    dnsTest: null,
     dryRun: null
   };
 
@@ -404,6 +405,14 @@ app.get('/api/diagnose', async (req, res) => {
   const useSimple = req.query.simple === 'true';
   let resolvedUrlObj = { url: testStreamUrl, hostHeader: null, originalHost: null };
   if (testStreamUrl) {
+    try {
+      const parsed = new URL(testStreamUrl);
+      const lookup = await dns.lookup(parsed.hostname);
+      diagnosis.dnsTest = { hostname: parsed.hostname, lookup };
+    } catch (e) {
+      diagnosis.dnsTest = { hostname: new URL(testStreamUrl).hostname, error: e.message };
+    }
+
     resolvedUrlObj = await resolveUrlToIp(testStreamUrl);
     // 1. Check direct fetch of the stream URL from Render server
     try {
