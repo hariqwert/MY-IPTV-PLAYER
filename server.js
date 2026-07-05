@@ -7,6 +7,7 @@ const cors = require('cors');
 const path = require('path');
 const { spawn } = require('child_process');
 const fs = require('fs');
+const dns = require('dns').promises;
 
 const app = express();
 app.use(cors());
@@ -39,13 +40,40 @@ async function probeUrl(url) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), CONNECT_TIMEOUT_MS);
   try {
-    const r = await fetch(url, { method: 'HEAD', signal: ctrl.signal, headers: { 'User-Agent': 'VLC/3.0.18 LibVLC/3.0.18' } });
+    const r = await fetch(url, { method: 'HEAD', signal: ctrl.signal, headers: { 'User-Agent': 'VLC/3.0.18' } });
     clearTimeout(t);
     return { ok: r.ok, status: r.status };
   } catch (e) {
     clearTimeout(t);
     return { ok: false, status: 0, error: e.name === 'AbortError' ? 'timeout' : e.message };
   }
+}
+
+// Pre-resolve hostname to IP to bypass static ffmpeg binary DNS resolution bugs in Docker/Render container sandboxes
+async function resolveUrlToIp(urlStr) {
+  try {
+    const parsed = new URL(urlStr);
+    const hostname = parsed.hostname;
+    
+    if (/^[0-9.]+$/.test(hostname) || hostname.includes(':')) {
+      return { url: urlStr, hostHeader: null, originalHost: hostname };
+    }
+
+    const addresses = await dns.resolve4(hostname);
+    if (addresses && addresses.length > 0) {
+      const ip = addresses[0];
+      const port = parsed.port ? `:${parsed.port}` : '';
+      parsed.host = `${ip}${port}`;
+      return {
+        url: parsed.href,
+        hostHeader: `Host: ${hostname}\r\n`,
+        originalHost: hostname
+      };
+    }
+  } catch (e) {
+    console.error('[DNS] Failed to resolve:', urlStr, e.message);
+  }
+  return { url: urlStr, hostHeader: null, originalHost: null };
 }
 
 function err(category, message, retryable) {
@@ -174,12 +202,14 @@ app.get('/api/stream-proxy', async (req, res) => {
 
   // Helper: spawn ffmpeg. Supports fast stream copy (default) or full transcoding (fallback).
   // Includes optimized probe & delay flags for instant startup.
-  function spawnFfmpeg(url, forceTranscode) {
+  function spawnFfmpeg(url, forceTranscode, hostHeader) {
+    const headersStr = (hostHeader || '') + `User-Agent: VLC/3.0.18 LibVLC/3.0.18\r\nAccept: */*\r\n`;
+    
     const args = [
       '-reconnect', '1',
       '-reconnect_streamed', '1',
       '-reconnect_delay_max', '5',
-      '-user_agent', headers['User-Agent'],
+      '-headers', headersStr,
       '-fflags', '+genpts+nobuffer',
       '-flags', '+low_delay',
       '-analyzeduration', '1000000',
@@ -270,7 +300,8 @@ app.get('/api/stream-proxy', async (req, res) => {
     if (forceTranscode) {
       res.setHeader('Access-Control-Allow-Origin', '*');
       res.setHeader('Content-Type', 'video/mp4');
-      pipeFfmpeg(spawnFfmpeg(streamUrl, true));
+      const { url: resolvedUrl, hostHeader } = await resolveUrlToIp(streamUrl);
+      pipeFfmpeg(spawnFfmpeg(resolvedUrl, true, hostHeader));
       return;
     }
 
@@ -308,7 +339,8 @@ app.get('/api/stream-proxy', async (req, res) => {
       console.log('[proxy] Non-HLS URL — starting ffmpeg stream copy:', streamUrl);
       res.setHeader('Access-Control-Allow-Origin', '*');
       res.setHeader('Content-Type', 'video/mp4');
-      pipeFfmpeg(spawnFfmpeg(streamUrl, false));
+      const { url: resolvedUrl, hostHeader } = await resolveUrlToIp(streamUrl);
+      pipeFfmpeg(spawnFfmpeg(resolvedUrl, false, hostHeader));
     }
   } catch (e) {
     if (res.headersSent) return res.destroy();
@@ -370,7 +402,9 @@ app.get('/api/diagnose', async (req, res) => {
   // Support dry-running a stream URL to inspect ffmpeg logs
   const testStreamUrl = req.query.url;
   const useSimple = req.query.simple === 'true';
+  let resolvedUrlObj = { url: testStreamUrl, hostHeader: null, originalHost: null };
   if (testStreamUrl) {
+    resolvedUrlObj = await resolveUrlToIp(testStreamUrl);
     // 1. Check direct fetch of the stream URL from Render server
     try {
       const start = Date.now();
@@ -379,7 +413,7 @@ app.get('/api/diagnose', async (req, res) => {
       const response = await fetch(testStreamUrl, {
         method: 'GET',
         headers: {
-          'User-Agent': 'VLC/3.0.18 LibVLC/3.0.18',
+          'User-Agent': 'VLC/3.0.18',
           'Accept': '*/*'
         },
         signal: controller.signal
@@ -404,8 +438,13 @@ app.get('/api/diagnose', async (req, res) => {
   if (testStreamUrl && diagnosis.ffmpegExists) {
     try {
       const { spawn } = require('child_process');
+      
+      const hostHeaders = resolvedUrlObj.hostHeader || `Host: ${resolvedUrlObj.originalHost || 'fastshare1.com'}\r\n`;
+      const fullHeaders = hostHeaders + `User-Agent: VLC/3.0.18 LibVLC/3.0.18\r\nAccept: */*\r\n`;
+
       const ffmpegArgs = useSimple ? [
-        '-i', testStreamUrl,
+        '-headers', fullHeaders,
+        '-i', resolvedUrlObj.url,
         '-c:v', 'copy',
         '-c:a', 'aac', '-b:a', '128k',
         '-f', 'mp4', '-movflags', 'frag_keyframe+empty_moov',
@@ -414,12 +453,12 @@ app.get('/api/diagnose', async (req, res) => {
         '-reconnect', '1',
         '-reconnect_streamed', '1',
         '-reconnect_delay_max', '5',
-        '-user_agent', 'VLC/3.0.18 LibVLC/3.0.18',
+        '-headers', fullHeaders,
         '-fflags', '+genpts+nobuffer',
         '-flags', '+low_delay',
         '-analyzeduration', '1000000',
         '-probesize', '1000000',
-        '-i', testStreamUrl,
+        '-i', resolvedUrlObj.url,
         '-c:v', 'copy',
         '-c:a', 'aac', '-b:a', '128k',
         '-f', 'mp4', '-movflags', 'frag_keyframe+empty_moov',
