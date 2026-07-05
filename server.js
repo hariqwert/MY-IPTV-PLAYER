@@ -256,6 +256,11 @@ app.get('/api/stream-proxy', async (req, res) => {
   }
 
   function pipeFfmpeg(ffmpeg) {
+    if (res.socket) res.socket.setNoDelay(true);
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+
     ffmpeg.on('error', (e) => {
       console.error('ffmpeg process error:', e.message);
       if (!res.headersSent) res.status(e.code === 'ENOENT' ? 500 : 502).send('Transcoder error: ' + e.message);
