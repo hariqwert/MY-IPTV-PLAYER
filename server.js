@@ -284,17 +284,8 @@ app.get('/api/stream-proxy', async (req, res) => {
       });
       res.send(rewritten.join('\n'));
     } else {
-      // Non-HLS (MPEG-TS, RTMP wrappers, etc.): probe first, then go straight to ffmpeg
-      console.log('[proxy] Non-HLS URL — probing reachability:', streamUrl);
-      const probe = await probeUrl(streamUrl);
-      if (!probe.ok) {
-        const msg = probe.status === 403 ? 'Stream blocked: provider rejected the request (403)'
-          : probe.error === 'timeout' ? 'Stream timeout: provider did not respond in time'
-          : `Stream unreachable: ${probe.error || 'status ' + probe.status}`;
-        console.error('[proxy] probe failed:', msg);
-        return res.status(502).send(msg);
-      }
-      console.log('[proxy] probe OK — starting ffmpeg transcode:', streamUrl);
+      // Non-HLS (MPEG-TS, RTMP wrappers, etc.): go straight to ffmpeg
+      console.log('[proxy] Non-HLS URL — starting ffmpeg stream copy:', streamUrl);
       res.setHeader('Access-Control-Allow-Origin', '*');
       res.setHeader('Content-Type', 'video/mp4');
       pipeFfmpeg(spawnFfmpeg(streamUrl));
