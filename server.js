@@ -327,7 +327,8 @@ app.get('/api/diagnose', async (req, res) => {
     ffmpegExists: false,
     ffmpegVersion: null,
     ffmpegError: null,
-    providerReachability: null
+    providerReachability: null,
+    dryRun: null
   };
 
   try {
@@ -364,6 +365,56 @@ app.get('/api/diagnose', async (req, res) => {
       ok: false,
       error: e.message
     };
+  }
+
+  // Support dry-running a stream URL to inspect ffmpeg logs
+  const testStreamUrl = req.query.url;
+  if (testStreamUrl && diagnosis.ffmpegExists) {
+    try {
+      const { spawn } = require('child_process');
+      const child = spawn(FFMPEG, [
+        '-reconnect', '1',
+        '-reconnect_streamed', '1',
+        '-reconnect_delay_max', '5',
+        '-user_agent', 'VLC/3.0.18 LibVLC/3.0.18',
+        '-fflags', '+genpts+nobuffer',
+        '-flags', '+low_delay',
+        '-analyzeduration', '1000000',
+        '-probesize', '1000000',
+        '-i', testStreamUrl,
+        '-c:v', 'copy',
+        '-c:a', 'aac', '-b:a', '128k',
+        '-f', 'mp4', '-movflags', 'frag_keyframe+empty_moov',
+        'pipe:1'
+      ]);
+
+      let dryStderr = '';
+      let dryBytes = 0;
+      child.stderr.on('data', (d) => { dryStderr += d.toString(); });
+      child.stdout.on('data', (d) => { dryBytes += d.length; });
+
+      await new Promise((resolve) => {
+        const timeout = setTimeout(() => {
+          try { child.kill('SIGKILL'); } catch {}
+          resolve();
+        }, 4000); // Run for 4 seconds
+        child.on('close', () => {
+          clearTimeout(timeout);
+          resolve();
+        });
+      });
+
+      diagnosis.dryRun = {
+        url: testStreamUrl,
+        stdoutBytes: dryBytes,
+        stderr: dryStderr
+      };
+    } catch (e) {
+      diagnosis.dryRun = {
+        url: testStreamUrl,
+        error: e.message
+      };
+    }
   }
 
   res.json(diagnosis);
