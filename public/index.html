@@ -1,0 +1,667 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Signal — One player, every source</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,600;1,9..144,500&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.5.13/hls.min.js"></script>
+<style>
+  :root {
+    --bg: #08080a;
+    --surface: #131316;
+    --surface-2: #1b1b20;
+    --line: #26262d;
+    --text: #f2f1ed;
+    --text-dim: #8b8b93;
+    --amber: #ff6a3d;
+    --green: #3ddc97;
+    --red: #ff5b6a;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); }
+  body {
+    color: var(--text);
+    font-family: 'Inter', -apple-system, sans-serif;
+    overflow: hidden;
+  }
+  .mono { font-family: 'IBM Plex Mono', monospace; }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration: 0.001ms !important; transition-duration: 0.001ms !important; }
+  }
+
+  /* ============ HERO ============ */
+  #hero {
+    position: fixed; inset: 0; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; text-align: center;
+    background:
+      radial-gradient(ellipse 900px 500px at 50% 15%, rgba(255,106,61,0.10), transparent 60%),
+      radial-gradient(ellipse 700px 500px at 85% 90%, rgba(61,220,151,0.05), transparent 60%),
+      var(--bg);
+    transition: opacity .6s ease, filter .6s ease, visibility .6s;
+    z-index: 20;
+  }
+  #hero.hidden { opacity: 0; filter: blur(12px); visibility: hidden; pointer-events: none; }
+
+  .eyebrow {
+    font-size: 12px; letter-spacing: 3px; color: var(--amber);
+    text-transform: uppercase; margin-bottom: 22px;
+    opacity: 0; transform: translateY(10px); animation: rise .7s ease forwards;
+  }
+  .dial {
+    font-family: 'IBM Plex Mono', monospace; font-size: 15px; color: var(--text-dim);
+    letter-spacing: 2px; margin-bottom: 18px; height: 20px;
+    opacity: 0; animation: rise .7s ease forwards; animation-delay: .05s;
+  }
+  .dial b { color: var(--amber); font-weight: 500; }
+
+  h1.headline {
+    font-family: 'Fraunces', serif; font-weight: 400; font-size: clamp(48px, 8vw, 108px);
+    line-height: 0.98; margin: 0; letter-spacing: -0.01em;
+    opacity: 0; transform: translateY(24px); animation: rise .8s cubic-bezier(.2,.8,.2,1) forwards;
+    animation-delay: .12s;
+  }
+  h1.headline em { font-style: italic; color: var(--amber); }
+  h1.headline .line2 {
+    display: block; opacity: 0; transform: translateY(24px);
+    animation: rise .8s cubic-bezier(.2,.8,.2,1) forwards; animation-delay: .28s;
+  }
+
+  .subtext {
+    font-size: 17px; color: var(--text-dim); max-width: 480px; margin: 26px auto 0;
+    line-height: 1.6;
+    opacity: 0; transform: translateY(16px); animation: rise .7s ease forwards; animation-delay: .42s;
+  }
+
+  #enter-btn {
+    margin-top: 40px; padding: 15px 34px; font-size: 14.5px; font-weight: 600;
+    letter-spacing: .3px; color: #14100c; background: var(--amber); border: none;
+    border-radius: 999px; cursor: pointer; font-family: 'Inter', sans-serif;
+    box-shadow: 0 0 0 0 rgba(255,106,61,.5);
+    transition: transform .15s ease, box-shadow .3s ease;
+    opacity: 0; animation: rise .7s ease forwards; animation-delay: .55s;
+  }
+  #enter-btn:hover { transform: translateY(-2px); box-shadow: 0 8px 28px -6px rgba(255,106,61,.55); }
+  #enter-btn:active { transform: translateY(0); }
+
+  .sources-strip {
+    position: absolute; bottom: 56px; display: flex; gap: 46px;
+    opacity: 0; animation: rise .7s ease forwards; animation-delay: .75s;
+  }
+  .source-chip { text-align: left; }
+  .source-chip .k { font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--amber); letter-spacing: 1px; }
+  .source-chip .v { font-size: 13px; color: var(--text-dim); margin-top: 3px; }
+
+  @keyframes rise { to { opacity: 1; transform: translateY(0); } }
+
+  /* ============ APP ============ */
+  #app {
+    position: fixed; inset: 0; display: flex; opacity: 0; visibility: hidden;
+    transition: opacity .5s ease .1s, visibility .5s;
+  }
+  #app.show { opacity: 1; visibility: visible; }
+
+  #sidebar {
+    width: 380px; min-width: 380px; background: var(--surface);
+    display: flex; flex-direction: column; border-right: 1px solid var(--line);
+  }
+  .panel { padding: 18px 18px 6px; }
+  .panel-title {
+    font-size: 11px; letter-spacing: 1.5px; text-transform: uppercase;
+    color: var(--text-dim); font-weight: 600; display: flex; justify-content: space-between;
+    font-family: 'IBM Plex Mono', monospace;
+  }
+  .panel-title button {
+    background: none; border: none; color: var(--amber); font-weight: 600;
+    font-size: 11px; letter-spacing: 1px; cursor: pointer; text-transform: uppercase;
+    font-family: 'IBM Plex Mono', monospace;
+  }
+  .back-link {
+    font-size: 11px; color: var(--text-dim); cursor: pointer; letter-spacing: .5px;
+    font-family: 'IBM Plex Mono', monospace; margin-bottom: 4px; display: inline-block;
+  }
+  .back-link:hover { color: var(--text); }
+
+  .source-card {
+    margin-top: 10px; padding: 13px 15px; border-radius: 10px; background: var(--surface-2);
+    border: 1px solid var(--line); cursor: pointer; transition: border-color .15s;
+  }
+  .source-card.active { border-color: var(--amber); }
+  .source-card .name { font-weight: 600; display: flex; align-items: center; gap: 8px; font-size: 14px; }
+  .source-card .meta { font-size: 11.5px; color: var(--text-dim); margin-top: 3px; font-family: 'IBM Plex Mono', monospace; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; margin-left: auto; }
+  .dot.ok { background: var(--green); box-shadow: 0 0 8px rgba(61,220,151,.6); }
+  .dot.err { background: var(--red); }
+
+  #search {
+    margin: 14px 18px; padding: 11px 16px; border-radius: 20px; border: 1px solid var(--line);
+    background: var(--surface-2); color: var(--text); font-size: 13px; width: calc(100% - 36px);
+    font-family: 'Inter', sans-serif;
+  }
+  #search:focus { outline: none; border-color: var(--amber); }
+  #search::placeholder { color: var(--text-dim); }
+
+  #browser { flex: 1; overflow-y: auto; display: flex; }
+  #groups { width: 130px; border-right: 1px solid var(--line); overflow-y: auto; padding: 8px 0; }
+  .group-item {
+    padding: 10px 12px; font-size: 12px; color: var(--text-dim); cursor: pointer;
+    border-left: 2px solid transparent; font-family: 'IBM Plex Mono', monospace;
+  }
+  .group-item.active { color: var(--text); border-left-color: var(--amber); background: var(--surface-2); }
+  #channels { flex: 1; overflow-y: auto; padding: 6px; }
+  .channel-item {
+    display: flex; align-items: center; gap: 10px; padding: 8px; border-radius: 8px;
+    cursor: pointer; margin-bottom: 2px; transition: background .12s;
+  }
+  .channel-item:hover { background: var(--surface-2); }
+  .channel-item.playing { background: var(--surface-2); box-shadow: inset 0 0 0 1px var(--amber); }
+  .channel-item img, .channel-item .ph {
+    width: 40px; height: 40px; border-radius: 6px; object-fit: contain; background: #fff; flex-shrink: 0;
+  }
+  .channel-item .ph {
+    background: var(--surface-2); display: flex; align-items: center; justify-content: center;
+    font-size: 15px; font-weight: 600; color: var(--text-dim); font-family: 'Fraunces', serif;
+  }
+  .channel-item .ctext { min-width: 0; }
+  .channel-item .cname { font-size: 13px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .channel-item .cgroup { font-size: 11px; color: var(--text-dim); font-family: 'IBM Plex Mono', monospace; }
+
+  #main { flex: 1; display: flex; flex-direction: column; background: #000; position: relative; }
+  #player-wrap { flex: 1; position: relative; display: flex; align-items: center; justify-content: center; }
+  video { width: 100%; height: 100%; background: #000; }
+  #placeholder {
+    color: var(--text-dim); font-size: 15px; text-align: center; font-family: 'Fraunces', serif;
+    font-style: italic;
+  }
+  #error-banner {
+    position: absolute; top: 24px; left: 50%; transform: translateX(-50%);
+    background: rgba(20, 10, 10, 0.94); border: 1px solid var(--red); color: var(--text);
+    padding: 14px 22px; border-radius: 10px; font-size: 13.5px; max-width: 420px; text-align: center;
+    display: none; z-index: 10;
+  }
+  #error-banner.show { display: block; }
+  #player-controls-overlay {
+    position: absolute; top: 18px; right: 18px; display: flex; gap: 8px; z-index: 10;
+  }
+  #status-badge {
+    font-size: 11px; padding: 6px 12px;
+    border-radius: 12px; background: rgba(0,0,0,.55); color: var(--text-dim);
+    font-family: 'IBM Plex Mono', monospace; letter-spacing: .5px;
+    border: 1px solid var(--line);
+  }
+  #quality-select {
+    background: rgba(19, 19, 22, 0.85); border: 1px solid var(--line); color: var(--text-dim);
+    padding: 6px 12px; border-radius: 12px; font-family: 'IBM Plex Mono', monospace;
+    font-size: 11px; cursor: pointer; outline: none; letter-spacing: 0.5px;
+  }
+  #quality-select:hover {
+    border-color: var(--amber); color: var(--text);
+  }
+
+  #modal-bg {
+    display: none; position: fixed; inset: 0; background: rgba(0,0,0,.65);
+    align-items: center; justify-content: center; z-index: 100;
+  }
+  #modal-bg.show { display: flex; }
+  #modal {
+    background: var(--surface); border-radius: 14px; padding: 26px; width: 380px;
+    border: 1px solid var(--line);
+  }
+  #modal h3 { margin: 0 0 18px; font-size: 18px; font-family: 'Fraunces', serif; font-weight: 500; }
+  #modal .tabs { display: flex; gap: 6px; margin-bottom: 18px; }
+  #modal .tab {
+    flex: 1; text-align: center; padding: 9px; border-radius: 8px; font-size: 12px;
+    background: var(--surface-2); cursor: pointer; color: var(--text-dim);
+    font-family: 'IBM Plex Mono', monospace; letter-spacing: .3px;
+  }
+  #modal .tab.active { background: var(--amber); color: #14100c; }
+  #modal input[type=text], #modal input[type=file] {
+    width: 100%; padding: 11px 13px; margin-bottom: 10px; border-radius: 8px;
+    border: 1px solid var(--line); background: var(--surface-2); color: var(--text); font-size: 13px;
+    font-family: 'Inter', sans-serif;
+  }
+  #modal input:focus { outline: none; border-color: var(--amber); }
+  #modal .row { display: flex; gap: 10px; margin-top: 18px; }
+  #modal button.wide {
+    flex: 1; padding: 11px; border-radius: 8px; border: none; font-weight: 600;
+    cursor: pointer; font-size: 13px; font-family: 'Inter', sans-serif;
+  }
+  #modal .btn-primary { background: var(--amber); color: #14100c; }
+  #modal .btn-secondary { background: var(--surface-2); color: var(--text); }
+  #modal-error { color: var(--red); font-size: 12px; margin-top: 6px; display: none; }
+</style>
+</head>
+<body>
+
+<!-- ============ HERO ============ -->
+<div id="hero">
+  <div class="eyebrow">One player · every source</div>
+  <div class="dial mono" id="dial-numeral">CH <b>001</b></div>
+  <h1 class="headline">Your channels.<span class="line2">Your <em>rules.</em></span></h1>
+  <p class="subtext">M3U, Xtream Codes, Stalker Portal — every source you already pay for, tuned into one player. No app store, no algorithm, no one else's queue.</p>
+  <button id="enter-btn" onclick="enterApp()">Enter the player</button>
+  <div class="sources-strip">
+    <div class="source-chip"><div class="k">01 · M3U</div><div class="v">Playlists & files</div></div>
+    <div class="source-chip"><div class="k">02 · XTREAM</div><div class="v">Panel accounts</div></div>
+    <div class="source-chip"><div class="k">03 · STALKER</div><div class="v">Ministra portals</div></div>
+  </div>
+</div>
+
+<!-- ============ APP ============ -->
+<div id="app">
+  <div id="sidebar">
+    <div class="panel">
+      <span class="back-link" onclick="backToHero()">&larr; signal</span>
+      <div class="panel-title">Sources <button onclick="openModal()">Add</button></div>
+      <div id="sources-list"></div>
+    </div>
+    <input id="search" placeholder="Search channels...">
+    <div id="browser">
+      <div id="groups"></div>
+      <div id="channels"></div>
+    </div>
+  </div>
+
+  <div id="main">
+    <div id="player-wrap">
+      <div id="placeholder">Pick a channel to begin</div>
+      <video id="video" style="display:none" controls></video>
+      <div id="player-controls-overlay">
+        <div id="status-badge" style="display:none"></div>
+        <div id="quality-selector-wrap" style="display:none">
+          <select id="quality-select" onchange="changeQuality(this.value)">
+            <option value="-1">Auto</option>
+          </select>
+        </div>
+      </div>
+      <div id="error-banner"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ ADD SOURCE MODAL ============ -->
+<div id="modal-bg">
+  <div id="modal">
+    <h3>Add M3U source</h3>
+    <div class="tabs">
+      <div class="tab active" data-tab="url" onclick="switchTab('url')">From URL</div>
+      <div class="tab" data-tab="file" onclick="switchTab('file')">Upload file</div>
+    </div>
+    <input id="label-input" type="text" placeholder="Label (e.g. My IPTV)">
+    <div id="tab-url"><input id="url-input" type="text" placeholder="https://example.com/playlist.m3u8"></div>
+    <div id="tab-file" style="display:none"><input id="file-input" type="file" accept=".m3u,.m3u8"></div>
+    <div id="modal-error"></div>
+    <div class="row">
+      <button class="wide btn-secondary" onclick="closeModal()">Cancel</button>
+      <button class="wide btn-primary" onclick="addSource()">Add</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ---------- Hero: tuning dial cycle ----------
+(function tuneDial() {
+  const el = document.getElementById('dial-numeral');
+  let n = 0, ticks = 0;
+  const maxTicks = 14;
+  const timer = setInterval(() => {
+    n = Math.floor(Math.random() * 900) + 100;
+    el.innerHTML = 'CH <b>' + n + '</b>';
+    ticks++;
+    if (ticks >= maxTicks) {
+      clearInterval(timer);
+      el.innerHTML = 'CH <b>001</b>';
+    }
+  }, 90);
+})();
+
+function enterApp() {
+  document.getElementById('hero').classList.add('hidden');
+  document.getElementById('app').classList.add('show');
+}
+function backToHero() {
+  document.getElementById('app').classList.remove('show');
+  document.getElementById('hero').classList.remove('hidden');
+}
+
+// ---------- App state ----------
+const state = { sources: [], activeSourceId: null, activeGroup: 'All', activeChannelId: null, hls: null };
+
+function openModal() { document.getElementById('modal-bg').classList.add('show'); }
+function closeModal() {
+  document.getElementById('modal-bg').classList.remove('show');
+  document.getElementById('modal-error').style.display = 'none';
+  document.getElementById('url-input').value = '';
+  document.getElementById('label-input').value = '';
+}
+function switchTab(tab) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
+  document.getElementById('tab-url').style.display = tab === 'url' ? 'block' : 'none';
+  document.getElementById('tab-file').style.display = tab === 'file' ? 'block' : 'none';
+}
+function showModalError(msg) {
+  const el = document.getElementById('modal-error');
+  el.textContent = msg; el.style.display = 'block';
+}
+
+async function addSource() {
+  const label = document.getElementById('label-input').value.trim() || 'IPTV Source';
+  const activeTab = document.querySelector('.tab.active').dataset.tab;
+  const id = 'src-' + Date.now();
+  let channels;
+
+  try {
+    if (activeTab === 'url') {
+      const url = document.getElementById('url-input').value.trim();
+      if (!url) return showModalError('Please enter a URL');
+      const res = await fetch('/api/m3u?url=' + encodeURIComponent(url));
+      const data = await res.json();
+      if (data.error) return showModalError(data.error.message);
+      channels = data.channels;
+    } else {
+      const fileInput = document.getElementById('file-input');
+      if (!fileInput.files.length) return showModalError('Please choose a file');
+      const text = await fileInput.files[0].text();
+      const res = await fetch('/api/m3u/upload', { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: text });
+      const data = await res.json();
+      if (data.error) return showModalError(data.error.message);
+      channels = data.channels;
+    }
+  } catch (e) {
+    return showModalError('Failed to load source: ' + e.message);
+  }
+
+  const groups = ['All', ...new Set(channels.map(c => c.group))];
+  state.sources.push({ id, label, type: 'm3u', status: 'connected', channels, groups });
+  state.activeSourceId = id;
+  state.activeGroup = 'All';
+  closeModal();
+  renderSources(); renderGroups(); renderChannels();
+  saveSourcesToDB(state.sources);
+}
+
+function renderSources() {
+  const el = document.getElementById('sources-list');
+  el.innerHTML = state.sources.map(s => `
+    <div class="source-card ${s.id === state.activeSourceId ? 'active' : ''}" onclick="selectSource('${s.id}')" style="position: relative; padding-right: 35px;">
+      <div class="name">${s.label} <span class="dot ${s.status === 'connected' ? 'ok' : 'err'}"></span></div>
+      <div class="meta">${s.type.toUpperCase()} · ${s.status}</div>
+      <button onclick="deleteSource(event, '${s.id}')" style="position: absolute; right: 12px; top: 50%; transform: translateY(-50%); background: none; border: none; color: var(--red); cursor: pointer; font-size: 11px; font-family: 'IBM Plex Mono', monospace; font-weight: bold; padding: 4px;">✕</button>
+    </div>
+  `).join('') || '<div style="color:var(--text-dim);font-size:12px;margin-top:10px;font-family:\'IBM Plex Mono\',monospace;">No sources yet</div>';
+}
+
+function deleteSource(event, id) {
+  event.stopPropagation();
+  if (!confirm('Remove this source?')) return;
+  state.sources = state.sources.filter(s => s.id !== id);
+  if (state.activeSourceId === id) {
+    state.activeSourceId = state.sources.length ? state.sources[0].id : null;
+  }
+  saveSourcesToDB(state.sources);
+  renderSources(); renderGroups(); renderChannels();
+}
+function selectSource(id) { state.activeSourceId = id; state.activeGroup = 'All'; renderSources(); renderGroups(); renderChannels(); }
+function currentSource() { return state.sources.find(s => s.id === state.activeSourceId); }
+
+function renderGroups() {
+  const src = currentSource();
+  const el = document.getElementById('groups');
+  if (!src) { el.innerHTML = ''; return; }
+  el.innerHTML = src.groups.map(g => `
+    <div class="group-item ${g === state.activeGroup ? 'active' : ''}" onclick="selectGroup('${g.replace(/'/g,"\\'")}')">${g}</div>
+  `).join('');
+}
+function selectGroup(g) { state.activeGroup = g; renderChannels(); }
+
+let visibleCount = 80;
+let filteredChannels = [];
+
+function renderChannels() {
+  const src = currentSource();
+  const el = document.getElementById('channels');
+  if (!src) { el.innerHTML = ''; return; }
+  const query = document.getElementById('search').value.trim().toLowerCase();
+  let list = src.channels;
+  if (state.activeGroup !== 'All') list = list.filter(c => c.group === state.activeGroup);
+  if (query) list = list.filter(c => c.name.toLowerCase().includes(query));
+
+  filteredChannels = list;
+  visibleCount = 80;
+  el.scrollTop = 0;
+  renderChannelsSlice();
+}
+
+function renderChannelsSlice() {
+  const src = currentSource();
+  const el = document.getElementById('channels');
+  if (!src) return;
+  
+  const slice = filteredChannels.slice(0, visibleCount);
+  el.innerHTML = slice.map(c => `
+    <div class="channel-item ${c.id === state.activeChannelId ? 'playing' : ''}" onclick="playChannel('${src.id}','${c.id}')">
+      ${c.logo ? `<img src="${c.logo}" loading="lazy" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
+                  <div class="ph" style="display:none">${(c.name[0] || '?').toUpperCase()}</div>`
+                : `<div class="ph">${(c.name[0] || '?').toUpperCase()}</div>`}
+      <div class="ctext">
+        <div class="cname">${c.name}</div>
+        <div class="cgroup">${c.group}</div>
+      </div>
+    </div>
+  `).join('') || '<div style="color:var(--text-dim);font-size:12px;padding:14px;font-family:\'IBM Plex Mono\',monospace;">No channels match</div>';
+  
+  if (visibleCount < filteredChannels.length) {
+    el.insertAdjacentHTML('beforeend', `<div id="load-more-indicator" style="text-align:center;padding:12px;font-size:11px;color:var(--text-dim);font-family:'IBM Plex Mono',monospace;">Scroll for more (${filteredChannels.length - visibleCount} hidden)</div>`);
+  }
+}
+
+// Infinite Scroll Loading
+document.getElementById('channels').addEventListener('scroll', function() {
+  if (this.scrollTop + this.clientHeight >= this.scrollHeight - 50) {
+    if (visibleCount < filteredChannels.length) {
+      visibleCount += 80;
+      renderChannelsSlice();
+    }
+  }
+});
+
+// Search Input Debouncing
+function debounce(func, wait) {
+  let timeout;
+  return function(...args) {
+    clearTimeout(timeout);
+    timeout = setTimeout(() => func.apply(this, args), wait);
+  };
+}
+document.getElementById('search').addEventListener('input', debounce(renderChannels, 150));
+
+function showError(msg) { const b = document.getElementById('error-banner'); b.textContent = msg; b.classList.add('show'); }
+function hideError() { document.getElementById('error-banner').classList.remove('show'); }
+function setStatus(text) { const b = document.getElementById('status-badge'); b.style.display = text ? 'block' : 'none'; b.textContent = text; }
+
+function playChannel(sourceId, channelId) {
+  const src = state.sources.find(s => s.id === sourceId);
+  const channel = src.channels.find(c => c.id === channelId);
+  if (!channel) return;
+  state.activeChannelId = channelId;
+  renderChannels(); hideError();
+  document.getElementById('placeholder').style.display = 'none';
+
+  // Reset quality selector
+  const qSelect = document.getElementById('quality-select');
+  qSelect.innerHTML = '<option value="-1">Auto</option>';
+  document.getElementById('quality-selector-wrap').style.display = 'none';
+
+  const video = document.getElementById('video');
+  video.style.display = 'block';
+  if (state.hls) { state.hls.destroy(); state.hls = null; }
+  video.src = '';
+
+  const proxyUrl = '/api/stream-proxy?url=' + encodeURIComponent(channel.streamUrl);
+  setStatus('Loading…');
+
+  const isHls = channel.streamUrl.includes('.m3u8') || channel.streamUrl.includes('.m3u');
+
+  if (isHls && Hls.isSupported()) {
+    const hls = new Hls({ maxBufferLength: 30 });
+    state.hls = hls;
+    hls.loadSource(proxyUrl);
+    hls.attachMedia(video);
+    hls.on(Hls.Events.MANIFEST_PARSED, () => { 
+      setStatus(''); 
+      video.play().catch(() => {}); 
+      
+      // Populate quality levels
+      const levels = hls.levels;
+      if (levels && levels.length >= 1) {
+        qSelect.innerHTML = '<option value="-1">Auto</option>';
+        levels.forEach((level, index) => {
+          const name = level.name || (level.height ? `${level.height}p` : `Level ${index}`);
+          const opt = document.createElement('option');
+          opt.value = index;
+          opt.textContent = name;
+          qSelect.appendChild(opt);
+        });
+        document.getElementById('quality-selector-wrap').style.display = 'block';
+      }
+    });
+    hls.on(Hls.Events.ERROR, (event, data) => {
+      if (!data.fatal) return;
+      if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+        const code = data.response && data.response.code;
+        if (code === 403) return fail("This channel is blocking automated access");
+        if (code === 504) return fail("This channel's server isn't responding");
+        hls.startLoad();
+      } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+        hls.destroy(); state.hls = null;
+        setStatus('Transcoding…');
+        video.src = proxyUrl + '&transcode=true';
+        video.play().catch(() => fail('Failed to load: no supported source found'));
+      } else {
+        fail('Playback failed: ' + data.type);
+      }
+    });
+  } else if (isHls && video.canPlayType('application/vnd.apple.mpegurl')) {
+    video.src = proxyUrl;
+    video.addEventListener('loadedmetadata', () => { setStatus(''); video.play().catch(() => {}); });
+  } else if (!isHls) {
+    // Populate direct vs transcode options for non-HLS streams
+    qSelect.innerHTML = `
+      <option value="direct">Source (Direct)</option>
+      <option value="transcode">Transcoded (Bypass)</option>
+    `;
+    document.getElementById('quality-selector-wrap').style.display = 'block';
+
+    // Non-HLS streams (e.g. direct transcoded streams from server.js)
+    video.src = proxyUrl;
+    const onCanPlay = () => {
+      setStatus('');
+      video.play().catch(e => {
+        console.warn("Autoplay block or playback issue:", e);
+        // Fallback: try forcing transcode parameter if normal stream failed
+        qSelect.value = 'transcode';
+        video.src = proxyUrl + '&transcode=true';
+        video.play().catch(() => fail('Failed to load stream'));
+      });
+      video.removeEventListener('canplay', onCanPlay);
+    };
+    video.addEventListener('canplay', onCanPlay);
+  } else {
+    fail('HLS playback is not supported in this browser');
+  }
+  function fail(msg) { setStatus(''); showError(msg); }
+}
+
+function changeQuality(val) {
+  if (state.hls) {
+    state.hls.currentLevel = parseInt(val, 10);
+  } else {
+    const src = currentSource();
+    const channel = src && src.channels.find(c => c.id === state.activeChannelId);
+    if (!channel) return;
+    const proxyUrl = '/api/stream-proxy?url=' + encodeURIComponent(channel.streamUrl);
+    const video = document.getElementById('video');
+    
+    if (state.hls) { state.hls.destroy(); state.hls = null; }
+    
+    if (val === 'transcode') {
+      setStatus('Transcoding…');
+      video.src = proxyUrl + '&transcode=true';
+    } else {
+      setStatus('Loading…');
+      video.src = proxyUrl;
+    }
+    
+    const onCanPlay = () => {
+      setStatus('');
+      video.play().catch(e => console.warn("Play failed:", e));
+      video.removeEventListener('canplay', onCanPlay);
+    };
+    video.addEventListener('canplay', onCanPlay);
+  }
+}
+
+// ---------- IndexedDB Storage Helpers ----------
+const dbName = 'SignalIPTVDB';
+const storeName = 'sources';
+
+function getDB() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(dbName, 1);
+    request.onupgradeneeded = (e) => {
+      const db = e.target.result;
+      if (!db.objectStoreNames.contains(storeName)) {
+        db.createObjectStore(storeName, { keyPath: 'id' });
+      }
+    };
+    request.onsuccess = (e) => resolve(e.target.result);
+    request.onerror = (e) => reject(e.target.error);
+  });
+}
+
+async function saveSourcesToDB(sources) {
+  try {
+    const db = await getDB();
+    const tx = db.transaction(storeName, 'readwrite');
+    const store = tx.objectStore(storeName);
+    const clearRequest = store.clear();
+    clearRequest.onsuccess = () => {
+      sources.forEach(src => store.put(src));
+    };
+  } catch (e) {
+    console.error("Failed to save to IndexedDB:", e);
+  }
+}
+
+async function loadSourcesFromDB() {
+  try {
+    const db = await getDB();
+    return new Promise((resolve) => {
+      const tx = db.transaction(storeName, 'readonly');
+      const store = tx.objectStore(storeName);
+      const request = store.getAll();
+      request.onsuccess = () => resolve(request.result || []);
+      request.onerror = () => resolve([]);
+    });
+  } catch (e) {
+    console.error("Failed to load from IndexedDB:", e);
+    return [];
+  }
+}
+
+// Load saved sources on page load
+window.addEventListener('DOMContentLoaded', async () => {
+  const saved = await loadSourcesFromDB();
+  if (saved && saved.length > 0) {
+    state.sources = saved;
+    state.activeSourceId = saved[0].id;
+    state.activeGroup = 'All';
+    renderSources();
+    renderGroups();
+    renderChannels();
+  }
+});
+</script>
+</body>
+</html>
