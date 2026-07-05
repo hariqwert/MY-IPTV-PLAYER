@@ -615,7 +615,7 @@ function playChannel(sourceId, channelId) {
     };
     video.addEventListener('canplay', onCanPlay, { once: true });
 
-    // 15-second loading timeout → auto-switch to transcode
+    // 25-second loading timeout → auto-switch to transcode
     state._loadTimer = setTimeout(() => {
       video.removeEventListener('canplay', onCanPlay);
       video.removeEventListener('error', onVideoError);
@@ -635,7 +635,7 @@ function playChannel(sourceId, channelId) {
         };
         video.addEventListener('error', onTranscodeError, { once: true });
       }
-    }, 15000);
+    }, 25000);
   } else {
     fail('HLS playback is not supported in this browser');
   }
