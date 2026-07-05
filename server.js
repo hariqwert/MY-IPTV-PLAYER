@@ -14,6 +14,7 @@ app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
 const PORT = process.env.PORT || 8080;
+const FFMPEG_STARTUP_TIMEOUT_MS = 12000; // kill ffmpeg if no data in 12s
 let FFMPEG = process.env.FFMPEG_PATH;
 if (!FFMPEG) {
   const defaultWinPath = 'C:\\Users\\HP\\AppData\\Local\\Microsoft\\WinGet\\Packages\\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\\ffmpeg-8.1.2-full_build\\bin\\ffmpeg.exe';
@@ -27,8 +28,25 @@ if (!FFMPEG) {
     }
   }
 }
-const CONNECT_TIMEOUT_MS = 30000;
+const CONNECT_TIMEOUT_MS = 8000;
 const IDLE_TIMEOUT_MS = 30000;
+
+// Log resolved ffmpeg path on startup
+console.log('[ffmpeg] resolved path:', FFMPEG);
+
+// Quick reachability probe for a URL (HEAD with short timeout)
+async function probeUrl(url) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), CONNECT_TIMEOUT_MS);
+  try {
+    const r = await fetch(url, { method: 'HEAD', signal: ctrl.signal, headers: { 'User-Agent': 'VLC/3.0.18 LibVLC/3.0.18' } });
+    clearTimeout(t);
+    return { ok: r.ok, status: r.status };
+  } catch (e) {
+    clearTimeout(t);
+    return { ok: false, status: 0, error: e.name === 'AbortError' ? 'timeout' : e.message };
+  }
+}
 
 function err(category, message, retryable) {
   return { error: { category, message, retryable } };
@@ -178,6 +196,17 @@ app.get('/api/stream-proxy', async (req, res) => {
     ffmpeg.stderr.on('data', (d) => { stderrBuf += d.toString(); });
     let gotData = false;
     ffmpeg.stdout.once('data', () => { gotData = true; });
+    // Kill ffmpeg if it produces no data within startup timeout
+    const startupTimer = setTimeout(() => {
+      if (!gotData) {
+        console.error('[ffmpeg] startup timeout — no data after', FFMPEG_STARTUP_TIMEOUT_MS, 'ms');
+        try { ffmpeg.kill('SIGKILL'); } catch (e) {}
+        if (!res.headersSent) res.status(504).send('Stream timeout: source unreachable or blocked by provider');
+        else res.destroy();
+      }
+    }, FFMPEG_STARTUP_TIMEOUT_MS);
+    ffmpeg.stdout.once('data', () => clearTimeout(startupTimer));
+    ffmpeg.on('close', () => clearTimeout(startupTimer));
     withIdleTimeout(ffmpeg.stdout, () => {
       if (!res.headersSent) res.status(504).send('Gateway Timeout: stream stalled');
       else res.destroy();
@@ -254,9 +283,17 @@ app.get('/api/stream-proxy', async (req, res) => {
       });
       res.send(rewritten.join('\n'));
     } else {
-      // Non-HLS (MPEG-TS, RTMP wrappers, etc.): go straight to ffmpeg
-      // This is exactly what VLC does — open URL directly, detect codec, play.
-      console.log('[proxy] Non-HLS URL — direct ffmpeg transcode:', streamUrl);
+      // Non-HLS (MPEG-TS, RTMP wrappers, etc.): probe first, then go straight to ffmpeg
+      console.log('[proxy] Non-HLS URL — probing reachability:', streamUrl);
+      const probe = await probeUrl(streamUrl);
+      if (!probe.ok) {
+        const msg = probe.status === 403 ? 'Stream blocked: provider rejected the request (403)'
+          : probe.error === 'timeout' ? 'Stream timeout: provider did not respond in time'
+          : `Stream unreachable: ${probe.error || 'status ' + probe.status}`;
+        console.error('[proxy] probe failed:', msg);
+        return res.status(502).send(msg);
+      }
+      console.log('[proxy] probe OK — starting ffmpeg transcode:', streamUrl);
       res.setHeader('Access-Control-Allow-Origin', '*');
       res.setHeader('Content-Type', 'video/mp4');
       pipeFfmpeg(spawnFfmpeg(streamUrl));

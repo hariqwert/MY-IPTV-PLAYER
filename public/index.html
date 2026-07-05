@@ -175,12 +175,19 @@
     font-style: italic;
   }
   #error-banner {
-    position: absolute; top: 24px; left: 50%; transform: translateX(-50%);
-    background: rgba(20, 10, 10, 0.94); border: 1px solid var(--red); color: var(--text);
-    padding: 14px 22px; border-radius: 10px; font-size: 13.5px; max-width: 420px; text-align: center;
-    display: none; z-index: 10;
+    display: none; position: absolute; bottom: 0; left: 0; right: 0;
+    background: rgba(255,91,106,0.15); border-top: 1px solid rgba(255,91,106,0.3);
+    color: var(--red); font-size: 13px; padding: 10px 16px;
+    align-items: center; justify-content: space-between; gap: 12px;
   }
-  #error-banner.show { display: block; }
+  #error-banner.show { display: flex; }
+  #error-retry-btn {
+    flex-shrink: 0; background: rgba(255,91,106,0.2); border: 1px solid rgba(255,91,106,0.4);
+    color: var(--red); padding: 5px 14px; border-radius: 6px; cursor: pointer;
+    font-size: 12px; font-family: 'Inter', sans-serif; font-weight: 600;
+    transition: background .15s;
+  }
+  #error-retry-btn:hover { background: rgba(255,91,106,0.35); }
   #player-controls-overlay {
     position: absolute; top: 18px; right: 18px; display: flex; gap: 8px; z-index: 10;
   }
@@ -275,7 +282,10 @@
           </select>
         </div>
       </div>
-      <div id="error-banner"></div>
+      <div id="error-banner">
+        <span id="error-msg"></span>
+        <button id="error-retry-btn" onclick="retryChannel()">&#8635; Retry</button>
+      </div>
     </div>
   </div>
 </div>
@@ -326,7 +336,7 @@ function backToHero() {
 }
 
 // ---------- App state ----------
-const state = { sources: [], activeSourceId: null, activeGroup: 'All', activeChannelId: null, hls: null };
+const state = { sources: [], activeSourceId: null, activeGroup: 'All', activeChannelId: null, hls: null, _loadTimer: null };
 
 function openModal() { document.getElementById('modal-bg').classList.add('show'); }
 function closeModal() {
@@ -476,9 +486,19 @@ function debounce(func, wait) {
 }
 document.getElementById('search').addEventListener('input', debounce(renderChannels, 150));
 
-function showError(msg) { const b = document.getElementById('error-banner'); b.textContent = msg; b.classList.add('show'); }
+function showError(msg, retryable = true) {
+  document.getElementById('error-msg').textContent = msg;
+  document.getElementById('error-retry-btn').style.display = retryable ? 'inline-block' : 'none';
+  document.getElementById('error-banner').classList.add('show');
+}
 function hideError() { document.getElementById('error-banner').classList.remove('show'); }
 function setStatus(text) { const b = document.getElementById('status-badge'); b.style.display = text ? 'block' : 'none'; b.textContent = text; }
+
+function retryChannel() {
+  if (state.activeChannelId && state.activeSourceId) {
+    playChannel(state.activeSourceId, state.activeChannelId);
+  }
+}
 
 function playChannel(sourceId, channelId) {
   const src = state.sources.find(s => s.id === sourceId);
@@ -487,6 +507,9 @@ function playChannel(sourceId, channelId) {
   state.activeChannelId = channelId;
   renderChannels(); hideError();
   document.getElementById('placeholder').style.display = 'none';
+
+  // Clear any previous timeout
+  if (state._loadTimer) { clearTimeout(state._loadTimer); state._loadTimer = null; }
 
   // Reset quality selector
   const qSelect = document.getElementById('quality-select');
@@ -553,20 +576,48 @@ function playChannel(sourceId, channelId) {
     `;
     document.getElementById('quality-selector-wrap').style.display = 'block';
 
-    // Non-HLS streams (e.g. direct transcoded streams from server.js)
     video.src = proxyUrl;
+
+    // Show clear error on video element failure
+    const onVideoError = () => {
+      clearTimeout(state._loadTimer);
+      const code = video.error ? video.error.code : 0;
+      const msgs = { 1: 'Playback aborted', 2: 'Network error while loading stream', 3: 'Stream could not be decoded — trying transcoded mode…', 4: 'Stream format not supported by browser' };
+      if (code === 3) {
+        // Try transcoded fallback
+        setStatus('Transcoding…');
+        video.removeEventListener('error', onVideoError);
+        video.src = proxyUrl + '&transcode=true';
+        video.play().catch(() => fail('Transcoding failed — stream may be blocked or offline'));
+      } else {
+        fail(msgs[code] || 'Playback error — stream may be offline or blocked');
+      }
+    };
+    video.addEventListener('error', onVideoError, { once: true });
+
     const onCanPlay = () => {
+      clearTimeout(state._loadTimer);
       setStatus('');
+      video.removeEventListener('error', onVideoError);
       video.play().catch(e => {
-        console.warn("Autoplay block or playback issue:", e);
-        // Fallback: try forcing transcode parameter if normal stream failed
+        console.warn('Autoplay block or playback issue:', e);
         qSelect.value = 'transcode';
         video.src = proxyUrl + '&transcode=true';
         video.play().catch(() => fail('Failed to load stream'));
       });
       video.removeEventListener('canplay', onCanPlay);
     };
-    video.addEventListener('canplay', onCanPlay);
+    video.addEventListener('canplay', onCanPlay, { once: true });
+
+    // 15-second loading timeout
+    state._loadTimer = setTimeout(() => {
+      video.removeEventListener('canplay', onCanPlay);
+      video.removeEventListener('error', onVideoError);
+      if (!video.readyState || video.readyState < 2) {
+        video.src = '';
+        fail('Stream timed out — provider may be blocking cloud servers. Try the "Transcoded (Bypass)" option.');
+      }
+    }, 15000);
   } else {
     fail('HLS playback is not supported in this browser');
   }
