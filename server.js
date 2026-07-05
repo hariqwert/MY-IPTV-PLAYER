@@ -223,7 +223,9 @@ app.get('/api/stream-proxy', async (req, res) => {
     }
 
     args.push(
-      '-fflags', '+genpts+nobuffer',
+      '-fflags', '+genpts+igndts+discardcorrupt+nobuffer',
+      '-correct_ts_overflow', '1',
+      '-avoid_negative_ts', 'make_zero',
       '-flags', '+low_delay+global_header',
       '-analyzeduration', '1000000',
       '-probesize', '1000000',
