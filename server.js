@@ -172,20 +172,39 @@ app.get('/api/stream-proxy', async (req, res) => {
   const abortController = new AbortController();
   req.on('close', () => abortController.abort());
 
-  // Helper: fast remux — copy streams as-is into fragmented MP4 (no re-encoding)
-  // Works for H.264/AAC MPEG-TS streams (most IPTV). Much faster than transcoding.
-  function spawnFfmpeg(url) {
-    return spawn(FFMPEG, [
+  // Helper: spawn ffmpeg. Supports fast stream copy (default) or full transcoding (fallback).
+  // Includes optimized probe & delay flags for instant startup.
+  function spawnFfmpeg(url, forceTranscode) {
+    const args = [
       '-reconnect', '1',
       '-reconnect_streamed', '1',
       '-reconnect_delay_max', '5',
       '-user_agent', headers['User-Agent'],
+      '-fflags', '+genpts+nobuffer',
+      '-flags', '+low_delay',
+      '-analyzeduration', '1000000',
+      '-probesize', '1000000',
       '-i', url,
-      '-c:v', 'copy',          // copy video — no re-encode (fast!)
-      '-c:a', 'aac', '-b:a', '128k', // convert audio to AAC (browser-safe)
+    ];
+
+    if (forceTranscode) {
+      args.push(
+        '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency',
+        '-c:a', 'aac', '-b:a', '128k'
+      );
+    } else {
+      args.push(
+        '-c:v', 'copy',                // copy video (extremely fast, low CPU)
+        '-c:a', 'aac', '-b:a', '128k'  // convert audio to AAC (browser-safe)
+      );
+    }
+
+    args.push(
       '-f', 'mp4', '-movflags', 'frag_keyframe+empty_moov',
-      'pipe:1',
-    ]);
+      'pipe:1'
+    );
+
+    return spawn(FFMPEG, args);
   }
 
   function pipeFfmpeg(ffmpeg) {
@@ -201,6 +220,7 @@ app.get('/api/stream-proxy', async (req, res) => {
     const startupTimer = setTimeout(() => {
       if (!gotData) {
         console.error('[ffmpeg] startup timeout — no data after', FFMPEG_STARTUP_TIMEOUT_MS, 'ms');
+        console.error('[ffmpeg] startup stderr log:\n', stderrBuf);
         try { ffmpeg.kill('SIGKILL'); } catch (e) {}
         if (!res.headersSent) res.status(504).send('Stream timeout: source unreachable or blocked by provider');
         else res.destroy();
@@ -250,7 +270,7 @@ app.get('/api/stream-proxy', async (req, res) => {
     if (forceTranscode) {
       res.setHeader('Access-Control-Allow-Origin', '*');
       res.setHeader('Content-Type', 'video/mp4');
-      pipeFfmpeg(spawnFfmpeg(streamUrl));
+      pipeFfmpeg(spawnFfmpeg(streamUrl, true));
       return;
     }
 
@@ -288,7 +308,7 @@ app.get('/api/stream-proxy', async (req, res) => {
       console.log('[proxy] Non-HLS URL — starting ffmpeg stream copy:', streamUrl);
       res.setHeader('Access-Control-Allow-Origin', '*');
       res.setHeader('Content-Type', 'video/mp4');
-      pipeFfmpeg(spawnFfmpeg(streamUrl));
+      pipeFfmpeg(spawnFfmpeg(streamUrl, false));
     }
   } catch (e) {
     if (res.headersSent) return res.destroy();
