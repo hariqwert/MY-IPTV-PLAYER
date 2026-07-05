@@ -369,6 +369,37 @@ app.get('/api/diagnose', async (req, res) => {
 
   // Support dry-running a stream URL to inspect ffmpeg logs
   const testStreamUrl = req.query.url;
+  if (testStreamUrl) {
+    // 1. Check direct fetch of the stream URL from Render server
+    try {
+      const start = Date.now();
+      const controller = new AbortController();
+      const t = setTimeout(() => controller.abort(), 6000);
+      const response = await fetch(testStreamUrl, {
+        method: 'GET',
+        headers: {
+          'User-Agent': 'VLC/3.0.18 LibVLC/3.0.18',
+          'Accept': '*/*'
+        },
+        signal: controller.signal
+      });
+      clearTimeout(t);
+      diagnosis.streamFetch = {
+        status: response.status,
+        ok: response.ok,
+        contentType: response.headers.get('content-type'),
+        contentLength: response.headers.get('content-length'),
+        headers: Object.fromEntries(response.headers.entries()),
+        timeMs: Date.now() - start
+      };
+    } catch (e) {
+      diagnosis.streamFetch = {
+        ok: false,
+        error: e.message
+      };
+    }
+  }
+
   if (testStreamUrl && diagnosis.ffmpegExists) {
     try {
       const { spawn } = require('child_process');
