@@ -54,9 +54,10 @@ async function resolveUrlToIp(urlStr) {
   try {
     const parsed = new URL(urlStr);
     const hostname = parsed.hostname;
+    const isHttps = parsed.protocol === 'https:';
     
     if (/^[0-9.]+$/.test(hostname) || hostname.includes(':')) {
-      return { url: urlStr, hostHeader: null, originalHost: hostname };
+      return { url: urlStr, hostHeader: null, originalHost: hostname, isHttps };
     }
 
     const lookup = await dns.lookup(hostname);
@@ -67,13 +68,14 @@ async function resolveUrlToIp(urlStr) {
       return {
         url: parsed.href,
         hostHeader: `Host: ${hostname}\r\n`,
-        originalHost: hostname
+        originalHost: hostname,
+        isHttps
       };
     }
   } catch (e) {
     console.error('[DNS] Failed to resolve:', urlStr, e.message);
   }
-  return { url: urlStr, hostHeader: null, originalHost: null };
+  return { url: urlStr, hostHeader: null, originalHost: null, isHttps: urlStr.startsWith('https') };
 }
 
 function err(category, message, retryable) {
@@ -202,7 +204,7 @@ app.get('/api/stream-proxy', async (req, res) => {
 
   // Helper: spawn ffmpeg. Supports fast stream copy (default) or full transcoding (fallback).
   // Includes optimized probe & delay flags for instant startup.
-  function spawnFfmpeg(url, forceTranscode, hostHeader) {
+  function spawnFfmpeg(url, forceTranscode, hostHeader, originalHost, isHttps) {
     const headersStr = (hostHeader || '') + `User-Agent: VLC/3.0.18 LibVLC/3.0.18\r\nAccept: */*\r\n`;
     
     const args = [
@@ -210,12 +212,23 @@ app.get('/api/stream-proxy', async (req, res) => {
       '-reconnect_streamed', '1',
       '-reconnect_delay_max', '5',
       '-headers', headersStr,
+    ];
+
+    // Fix HTTPS / TLS SNI verification gap for IP-routed URLs
+    if (isHttps && originalHost) {
+      args.push(
+        '-tls_host', originalHost,
+        '-tls_verify', '0'
+      );
+    }
+
+    args.push(
       '-fflags', '+genpts+nobuffer',
       '-flags', '+low_delay',
       '-analyzeduration', '1000000',
       '-probesize', '1000000',
-      '-i', url,
-    ];
+      '-i', url
+    );
 
     if (forceTranscode) {
       args.push(
@@ -300,8 +313,8 @@ app.get('/api/stream-proxy', async (req, res) => {
     if (forceTranscode) {
       res.setHeader('Access-Control-Allow-Origin', '*');
       res.setHeader('Content-Type', 'video/mp4');
-      const { url: resolvedUrl, hostHeader } = await resolveUrlToIp(streamUrl);
-      pipeFfmpeg(spawnFfmpeg(resolvedUrl, true, hostHeader));
+      const { url: resolvedUrl, hostHeader, originalHost, isHttps } = await resolveUrlToIp(streamUrl);
+      pipeFfmpeg(spawnFfmpeg(resolvedUrl, true, hostHeader, originalHost, isHttps));
       return;
     }
 
@@ -339,8 +352,8 @@ app.get('/api/stream-proxy', async (req, res) => {
       console.log('[proxy] Non-HLS URL — starting ffmpeg stream copy:', streamUrl);
       res.setHeader('Access-Control-Allow-Origin', '*');
       res.setHeader('Content-Type', 'video/mp4');
-      const { url: resolvedUrl, hostHeader } = await resolveUrlToIp(streamUrl);
-      pipeFfmpeg(spawnFfmpeg(resolvedUrl, false, hostHeader));
+      const { url: resolvedUrl, hostHeader, originalHost, isHttps } = await resolveUrlToIp(streamUrl);
+      pipeFfmpeg(spawnFfmpeg(resolvedUrl, false, hostHeader, originalHost, isHttps));
     }
   } catch (e) {
     if (res.headersSent) return res.destroy();
@@ -451,23 +464,38 @@ app.get('/api/diagnose', async (req, res) => {
       const hostHeaders = resolvedUrlObj.hostHeader || `Host: ${resolvedUrlObj.originalHost || 'fastshare1.com'}\r\n`;
       const fullHeaders = hostHeaders + `User-Agent: VLC/3.0.18 LibVLC/3.0.18\r\nAccept: */*\r\n`;
 
+      const dryRunArgs = [
+        '-reconnect', '1',
+        '-reconnect_streamed', '1',
+        '-reconnect_delay_max', '5',
+        '-headers', fullHeaders,
+      ];
+
+      if (resolvedUrlObj.isHttps && resolvedUrlObj.originalHost) {
+        dryRunArgs.push(
+          '-tls_host', resolvedUrlObj.originalHost,
+          '-tls_verify', '0'
+        );
+      }
+
+      dryRunArgs.push(
+        '-fflags', '+genpts+nobuffer',
+        '-flags', '+low_delay',
+        '-analyzeduration', '1000000',
+        '-probesize', '1000000',
+        '-i', resolvedUrlObj.url
+      );
+
       const ffmpegArgs = useSimple ? [
         '-headers', fullHeaders,
+        ...(resolvedUrlObj.isHttps ? ['-tls_host', resolvedUrlObj.originalHost, '-tls_verify', '0'] : []),
         '-i', resolvedUrlObj.url,
         '-c:v', 'copy',
         '-c:a', 'aac', '-b:a', '128k',
         '-f', 'mp4', '-movflags', 'frag_keyframe+empty_moov',
         'pipe:1'
       ] : [
-        '-reconnect', '1',
-        '-reconnect_streamed', '1',
-        '-reconnect_delay_max', '5',
-        '-headers', fullHeaders,
-        '-fflags', '+genpts+nobuffer',
-        '-flags', '+low_delay',
-        '-analyzeduration', '1000000',
-        '-probesize', '1000000',
-        '-i', resolvedUrlObj.url,
+        ...dryRunArgs,
         '-c:v', 'copy',
         '-c:a', 'aac', '-b:a', '128k',
         '-f', 'mp4', '-movflags', 'frag_keyframe+empty_moov',
