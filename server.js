@@ -235,9 +235,9 @@ app.get('/api/stream-proxy', async (req, res) => {
         '-c:v', 'libx264',
         '-preset', 'ultrafast',
         '-tune', 'zerolatency',
-        '-crf', '28',
-        '-g', '50',
-        '-vf', 'yadif,scale=-2:480',
+        '-crf', '30',
+        '-g', '25',
+        '-vf', 'yadif=0:-1:0,scale=-2:360',
         '-c:a', 'aac', '-b:a', '128k'
       );
     } else {
