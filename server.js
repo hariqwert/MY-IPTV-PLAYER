@@ -369,6 +369,7 @@ app.get('/api/diagnose', async (req, res) => {
 
   // Support dry-running a stream URL to inspect ffmpeg logs
   const testStreamUrl = req.query.url;
+  const useSimple = req.query.simple === 'true';
   if (testStreamUrl) {
     // 1. Check direct fetch of the stream URL from Render server
     try {
@@ -403,7 +404,13 @@ app.get('/api/diagnose', async (req, res) => {
   if (testStreamUrl && diagnosis.ffmpegExists) {
     try {
       const { spawn } = require('child_process');
-      const child = spawn(FFMPEG, [
+      const ffmpegArgs = useSimple ? [
+        '-i', testStreamUrl,
+        '-c:v', 'copy',
+        '-c:a', 'aac', '-b:a', '128k',
+        '-f', 'mp4', '-movflags', 'frag_keyframe+empty_moov',
+        'pipe:1'
+      ] : [
         '-reconnect', '1',
         '-reconnect_streamed', '1',
         '-reconnect_delay_max', '5',
@@ -417,7 +424,9 @@ app.get('/api/diagnose', async (req, res) => {
         '-c:a', 'aac', '-b:a', '128k',
         '-f', 'mp4', '-movflags', 'frag_keyframe+empty_moov',
         'pipe:1'
-      ]);
+      ];
+
+      const child = spawn(FFMPEG, ffmpegArgs);
 
       let dryStderr = '';
       let dryBytes = 0;
