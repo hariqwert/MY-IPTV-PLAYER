@@ -320,4 +320,53 @@ app.get('/api/stream-proxy', async (req, res) => {
   }
 });
 
+// Diagnostic endpoint to check ffmpeg execution and network status
+app.get('/api/diagnose', async (req, res) => {
+  const diagnosis = {
+    ffmpegPath: FFMPEG,
+    ffmpegExists: false,
+    ffmpegVersion: null,
+    ffmpegError: null,
+    providerReachability: null
+  };
+
+  try {
+    diagnosis.ffmpegExists = fs.existsSync(FFMPEG) || FFMPEG === 'ffmpeg';
+  } catch (e) {
+    diagnosis.ffmpegError = e.message;
+  }
+
+  if (diagnosis.ffmpegExists) {
+    try {
+      const { execSync } = require('child_process');
+      const versionOut = execSync(`"${FFMPEG}" -version`).toString();
+      diagnosis.ffmpegVersion = versionOut.split('\n')[0];
+    } catch (e) {
+      diagnosis.ffmpegError = `Execution failed: ${e.message}`;
+    }
+  }
+
+  try {
+    const testUrl = 'http://fastshare1.com';
+    const start = Date.now();
+    const controller = new AbortController();
+    const t = setTimeout(() => controller.abort(), 5000);
+    const testRes = await fetch(testUrl, { method: 'HEAD', signal: controller.signal, headers: { 'User-Agent': 'VLC/3.0.18' } });
+    clearTimeout(t);
+    diagnosis.providerReachability = {
+      url: testUrl,
+      status: testRes.status,
+      ok: testRes.ok,
+      timeMs: Date.now() - start
+    };
+  } catch (e) {
+    diagnosis.providerReachability = {
+      ok: false,
+      error: e.message
+    };
+  }
+
+  res.json(diagnosis);
+});
+
 app.listen(PORT, () => console.log(`IPTV player running at http://localhost:${PORT}`));
