@@ -270,10 +270,12 @@ app.get('/api/stream-proxy', async (req, res) => {
   try {
     // --- Segment passthrough (HLS chunks) ---
     if (isSegment) {
+      console.log('[proxy] HLS Segment requested:', streamUrl);
       const connectTimer = setTimeout(() => abortController.abort(), CONNECT_TIMEOUT_MS);
       const response = await fetch(streamUrl, { headers, signal: abortController.signal });
       clearTimeout(connectTimer);
       if (!response.ok) {
+        console.error('[proxy] HLS Segment fetch failed:', response.status, streamUrl);
         return res.status(response.status).send(`Provider returned ${response.status}`);
       }
       const contentType = response.headers.get('content-type');
@@ -292,6 +294,7 @@ app.get('/api/stream-proxy', async (req, res) => {
 
     // --- Force transcode (explicit flag) ---
     if (forceTranscode) {
+      console.log('[proxy] Transcoding requested:', streamUrl);
       res.setHeader('Access-Control-Allow-Origin', '*');
       res.setHeader('Content-Type', 'video/mp4');
       pipeFfmpeg(spawnFfmpeg(streamUrl, true));
@@ -304,11 +307,13 @@ app.get('/api/stream-proxy', async (req, res) => {
     const looksLikeHls = streamUrl.includes('.m3u8');
 
     if (looksLikeHls) {
+      console.log('[proxy] HLS Manifest requested:', streamUrl);
       // HLS manifest: fetch, rewrite segment URLs, serve
       const connectTimer = setTimeout(() => abortController.abort(), CONNECT_TIMEOUT_MS);
       const response = await fetch(streamUrl, { headers, signal: abortController.signal });
       clearTimeout(connectTimer);
       if (!response.ok) {
+        console.error('[proxy] HLS Manifest fetch failed:', response.status, streamUrl);
         return res.status(response.status).send(`Provider returned ${response.status}`);
       }
       const contentType = response.headers.get('content-type');
