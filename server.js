@@ -109,7 +109,7 @@ async function followRedirectsAndResolve(urlStr) {
       }
       break;
     } catch (e) {
-      console.error('[Redirect Follower] Error:', e.message);
+      console.error('[Redirect Follower] Error:', e);
       break;
     }
   }
