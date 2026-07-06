@@ -38,3 +38,6 @@ Not wired in here (both need real credentials to test against). They plug
 into the exact same /api/stream-proxy — see the technical reference PDF
 from earlier in this conversation for the endpoint/header/call-sequence
 details.
+## A testing stage website preview 
+https://my-iptv-player.onrender.com/
+
