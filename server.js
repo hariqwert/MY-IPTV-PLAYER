@@ -7,9 +7,38 @@ const cors = require('cors');
 const path = require('path');
 const { spawn } = require('child_process');
 const fs = require('fs');
+const dns = require('dns');
 const dnsPromises = require('dns').promises;
 const dnsResolver = new dnsPromises.Resolver();
 dnsResolver.setServers(['8.8.8.8', '1.1.1.1']);
+
+// Override dns.lookup globally to bypass bad OS DNS servers / timeouts
+const originalLookup = dns.lookup;
+dns.lookup = function(hostname, options, callback) {
+  if (typeof options === 'function') {
+    callback = options;
+    options = {};
+  } else if (!options) {
+    options = {};
+  }
+
+  dnsResolver.resolve4(hostname)
+    .then(ips => {
+      if (ips && ips.length > 0) {
+        if (options.all) {
+          const addresses = ips.map(ip => ({ address: ip, family: 4 }));
+          callback(null, addresses);
+        } else {
+          callback(null, ips[0], 4);
+        }
+      } else {
+        originalLookup(hostname, options, callback);
+      }
+    })
+    .catch(err => {
+      originalLookup(hostname, options, callback);
+    });
+};
 
 const app = express();
 app.use(cors());
@@ -56,16 +85,6 @@ async function probeUrl(url) {
   }
 }
 
-async function resolveHostCustom(hostname) {
-  try {
-    const ips = await dnsResolver.resolve4(hostname);
-    if (ips && ips.length > 0) return ips[0];
-  } catch (e) {
-    console.error('[Custom DNS] Failed to resolve:', hostname, e.message);
-  }
-  return null;
-}
-
 async function followRedirectsAndResolve(urlStr) {
   let currentUrl = urlStr;
   let redirectCount = 0;
@@ -74,7 +93,6 @@ async function followRedirectsAndResolve(urlStr) {
 
   while (redirectCount < maxRedirects) {
     try {
-      const parsed = new URL(currentUrl);
       const response = await fetch(currentUrl, {
         method: 'HEAD',
         headers,
@@ -105,8 +123,9 @@ async function followRedirectsAndResolve(urlStr) {
       return { url: currentUrl, hostHeader: null, originalHost, isHttps };
     }
 
-    const ip = await resolveHostCustom(originalHost);
-    if (ip) {
+    const lookup = await dnsPromises.lookup(originalHost);
+    if (lookup && lookup.address) {
+      const ip = lookup.address;
       const port = parsed.port ? `:${parsed.port}` : '';
       parsed.hostname = ip;
       return {
@@ -122,7 +141,6 @@ async function followRedirectsAndResolve(urlStr) {
 
   return { url: currentUrl, hostHeader: null, originalHost: null, isHttps: currentUrl.startsWith('https') };
 }
-
 
 
 function err(category, message, retryable) {
