@@ -909,6 +909,34 @@ window.addEventListener('DOMContentLoaded', async () => {
     renderSources();
     renderGroups();
     renderChannels();
+  } else {
+    try {
+      const res = await fetch('/default.m3u');
+      if (res.ok) {
+        const text = await res.text();
+        const uploadRes = await fetch('/api/m3u/upload', {
+          method: 'POST',
+          headers: { 'Content-Type': 'text/plain' },
+          body: text
+        });
+        const data = await uploadRes.json();
+        if (data.channels && data.channels.length > 0) {
+          const id = 'src-default';
+          const label = 'Star M3U';
+          const channels = data.channels;
+          const groups = ['All', ...new Set(channels.map(c => c.group))];
+          state.sources.push({ id, label, type: 'm3u', status: 'connected', channels, groups });
+          state.activeSourceId = id;
+          state.activeGroup = 'All';
+          renderSources();
+          renderGroups();
+          renderChannels();
+          saveSourcesToDB(state.sources);
+        }
+      }
+    } catch (e) {
+      console.error('Failed to load default source:', e);
+    }
   }
 });
 </script>
