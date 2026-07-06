@@ -7,6 +7,7 @@ const cors = require('cors');
 const path = require('path');
 const { spawn } = require('child_process');
 const fs = require('fs');
+const axios = require('axios');
 const dns = require('dns');
 const dnsPromises = require('dns').promises;
 const dnsResolver = new dnsPromises.Resolver();
@@ -53,7 +54,6 @@ if (!FFMPEG) {
   if (fs.existsSync(defaultWinPath)) {
     FFMPEG = defaultWinPath;
   } else {
-    // Prioritize system-wide ffmpeg on Linux (Render) to guarantee GPL libx264 support
     if (process.platform === 'linux') {
       FFMPEG = 'ffmpeg';
     } else {
@@ -76,31 +76,38 @@ async function probeUrl(url) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), CONNECT_TIMEOUT_MS);
   try {
-    const r = await fetch(url, { method: 'HEAD', signal: ctrl.signal, headers: { 'User-Agent': 'VLC/3.0.18' } });
+    const r = await axios.head(url, {
+      signal: ctrl.signal,
+      headers: { 'User-Agent': 'VLC/3.0.18' },
+      validateStatus: (status) => status >= 200 && status < 400
+    });
     clearTimeout(t);
-    return { ok: r.ok, status: r.status };
+    return { ok: true, status: r.status };
   } catch (e) {
     clearTimeout(t);
-    return { ok: false, status: 0, error: e.name === 'AbortError' ? 'timeout' : e.message };
+    return { ok: false, status: e.response ? e.response.status : 0, error: e.name === 'CanceledError' ? 'timeout' : e.message };
   }
 }
 
-async function followRedirectsAndResolve(urlStr) {
+async function followRedirectsAndResolve(urlStr, referer, userAgent) {
   let currentUrl = urlStr;
   let redirectCount = 0;
   const maxRedirects = 5;
-  const headers = { 'User-Agent': 'VLC/3.0.18 LibVLC/3.0.18', Accept: '*/*' };
+  const headers = { 'User-Agent': userAgent || 'VLC/3.0.18 LibVLC/3.0.18', Accept: '*/*' };
+  if (referer) {
+    headers['Referer'] = referer;
+  }
 
   while (redirectCount < maxRedirects) {
     try {
-      const response = await fetch(currentUrl, {
-        method: 'HEAD',
+      const response = await axios.head(currentUrl, {
         headers,
-        redirect: 'manual'
+        maxRedirects: 0,
+        validateStatus: (status) => status >= 200 && status < 400
       });
 
       if (response.status >= 300 && response.status < 400) {
-        const location = response.headers.get('location');
+        const location = response.headers['location'];
         if (location) {
           currentUrl = location.startsWith('http') ? location : new URL(location, currentUrl).href;
           redirectCount++;
@@ -109,39 +116,26 @@ async function followRedirectsAndResolve(urlStr) {
       }
       break;
     } catch (e) {
-      console.error('[Redirect Follower] Error:', e);
+      if (e.response && e.response.status >= 300 && e.response.status < 400) {
+        const location = e.response.headers['location'];
+        if (location) {
+          currentUrl = location.startsWith('http') ? location : new URL(location, currentUrl).href;
+          redirectCount++;
+          continue;
+        }
+      }
+      console.error('[Redirect Follower] Error:', e.message);
       break;
     }
   }
 
-  try {
-    const parsed = new URL(currentUrl);
-    const originalHost = parsed.hostname;
-    const isHttps = parsed.protocol === 'https:';
-    
-    if (/^[0-9.]+$/.test(originalHost) || originalHost.includes(':')) {
-      return { url: currentUrl, hostHeader: null, originalHost, isHttps };
-    }
-
-    const lookup = await dnsPromises.lookup(originalHost);
-    if (lookup && lookup.address) {
-      const ip = lookup.address;
-      const port = parsed.port ? `:${parsed.port}` : '';
-      parsed.hostname = ip;
-      return {
-        url: parsed.href,
-        hostHeader: `Host: ${originalHost}\r\n`,
-        originalHost,
-        isHttps
-      };
-    }
-  } catch (e) {
-    console.error('[Custom DNS resolution] Error:', e.message);
-  }
-
-  return { url: currentUrl, hostHeader: null, originalHost: null, isHttps: currentUrl.startsWith('https') };
+  const parsed = new URL(currentUrl);
+  return {
+    url: currentUrl,
+    originalHost: parsed.hostname,
+    isHttps: parsed.protocol === 'https:'
+  };
 }
-
 
 function err(category, message, retryable) {
   return { error: { category, message, retryable } };
@@ -166,15 +160,33 @@ function parseM3U(text) {
       const attrsPart = commaIdx !== -1 ? meta.substring(0, commaIdx) : meta;
       const name = commaIdx !== -1 ? meta.substring(commaIdx + 1).trim() : 'Unknown';
       const attrs = {};
-      const attrRegex = /(tvg-id|tvg-name|tvg-logo|group-title)="([^"]*)"/g;
+      const attrRegex = /(tvg-id|tvg-name|tvg-logo|group-title|http-referrer|referrer|user-agent)="([^"]*)"/gi;
       let m;
-      while ((m = attrRegex.exec(attrsPart)) !== null) attrs[m[1]] = m[2];
+      while ((m = attrRegex.exec(attrsPart)) !== null) {
+        attrs[m[1].toLowerCase()] = m[2];
+      }
       current = {
         name,
         logo: attrs['tvg-logo'] || '',
         group: attrs['group-title'] || 'Uncategorized',
         tvgId: attrs['tvg-id'] || '',
+        referrer: attrs['http-referrer'] || attrs['referrer'] || '',
+        userAgent: attrs['user-agent'] || '',
       };
+    } else if (line.toUpperCase().startsWith('#EXTVLCOPT:')) {
+      if (current) {
+        const opt = line.substring(11).trim();
+        const eqIdx = opt.indexOf('=');
+        if (eqIdx !== -1) {
+          const key = opt.substring(0, eqIdx).trim().toLowerCase();
+          const val = opt.substring(eqIdx + 1).trim();
+          if (key === 'http-referrer' || key === 'referrer') {
+            current.referrer = val;
+          } else if (key === 'http-user-agent' || key === 'user-agent') {
+            current.userAgent = val;
+          }
+        }
+      }
     } else if (line && !line.startsWith('#') && current) {
       current.id = `m3u-${idx++}`;
       current.streamUrl = line;
@@ -192,14 +204,13 @@ app.get('/api/m3u', async (req, res) => {
   try {
     const controller = new AbortController();
     const t = setTimeout(() => controller.abort(), CONNECT_TIMEOUT_MS);
-    const response = await fetch(url, { signal: controller.signal });
+    const response = await axios.get(url, {
+      responseType: 'text',
+      signal: controller.signal,
+      headers: { 'User-Agent': 'VLC/3.0.18' }
+    });
     clearTimeout(t);
-    if (!response.ok) {
-      return res.status(response.status).json(
-        err('unreachable', `Provider returned status ${response.status}`, true)
-      );
-    }
-    const text = await response.text();
+    const text = response.data;
     let channels;
     try {
       channels = parseM3U(text);
@@ -211,7 +222,7 @@ app.get('/api/m3u', async (req, res) => {
     }
     res.json({ channels });
   } catch (e) {
-    const isTimeout = e.name === 'AbortError';
+    const isTimeout = e.name === 'CanceledError';
     res.status(isTimeout ? 504 : 502).json(
       isTimeout
         ? err('unreachable', "This source isn't responding", true)
@@ -256,8 +267,9 @@ function withIdleTimeout(stream, onTimeout) {
 
 app.get('/api/stream-proxy', async (req, res) => {
   const streamUrl = req.query.url;
-  const isSegment = req.query.segment === 'true';
   const forceTranscode = req.query.transcode === 'true';
+  const referer = req.query.referer || req.query.referrer;
+  const userAgentParam = req.query.userAgent || req.query.useragent;
 
   if (!streamUrl || typeof streamUrl !== 'string') {
     return res.status(400).send('Missing url parameter');
@@ -266,18 +278,22 @@ app.get('/api/stream-proxy', async (req, res) => {
   const abortController = new AbortController();
   req.on('close', () => abortController.abort());
 
-  // Pre-resolve and follow redirects for the stream URL using custom DNS (8.8.8.8) fallback
-  const { url: resolvedUrl, hostHeader, originalHost, isHttps } = await followRedirectsAndResolve(streamUrl);
+  // Pre-resolve and follow redirects for the stream URL (maintaining domain name)
+  const { url: resolvedUrl, originalHost, isHttps } = await followRedirectsAndResolve(streamUrl, referer, userAgentParam);
 
-  const headers = { 'User-Agent': 'VLC/3.0.18 LibVLC/3.0.18', Accept: '*/*' };
-  if (originalHost) {
-    headers['Host'] = originalHost;
+  const headers = { 'User-Agent': userAgentParam || 'VLC/3.0.18 LibVLC/3.0.18', Accept: '*/*' };
+  if (referer) {
+    headers['Referer'] = referer;
   }
 
   // Helper: spawn ffmpeg. Supports fast stream copy (default) or full transcoding (fallback).
   // Includes optimized probe & delay flags for instant startup.
-  function spawnFfmpeg(url, forceTranscode, hostHeader, originalHost, isHttps) {
-    const headersStr = (hostHeader || '') + `User-Agent: VLC/3.0.18 LibVLC/3.0.18\r\nAccept: */*\r\n`;
+  function spawnFfmpeg(url, forceTranscode) {
+    const ua = userAgentParam || 'VLC/3.0.18 LibVLC/3.0.18';
+    let headersStr = `User-Agent: ${ua}\r\nAccept: */*\r\n`;
+    if (referer) {
+      headersStr += `Referer: ${referer}\r\n`;
+    }
     
     const args = [
       '-reconnect', '1',
@@ -285,14 +301,6 @@ app.get('/api/stream-proxy', async (req, res) => {
       '-reconnect_delay_max', '5',
       '-headers', headersStr,
     ];
-
-    // Fix HTTPS / TLS SNI verification gap for IP-routed URLs
-    if (isHttps && originalHost) {
-      args.push(
-        '-tls_host', originalHost,
-        '-tls_verify', '0'
-      );
-    }
 
     args.push(
       '-fflags', '+genpts+igndts+discardcorrupt+nobuffer',
@@ -371,77 +379,14 @@ app.get('/api/stream-proxy', async (req, res) => {
   }
 
   try {
-    // --- Segment passthrough (HLS chunks) ---
-    if (isSegment) {
-      console.log('[proxy] HLS Segment requested (resolved):', resolvedUrl);
-      const connectTimer = setTimeout(() => abortController.abort(), CONNECT_TIMEOUT_MS);
-      const response = await fetch(resolvedUrl, { headers, signal: abortController.signal });
-      clearTimeout(connectTimer);
-      if (!response.ok) {
-        console.error('[proxy] HLS Segment fetch failed:', response.status, resolvedUrl);
-        return res.status(response.status).send(`Provider returned ${response.status}`);
-      }
-      const contentType = response.headers.get('content-type');
-      if (contentType) res.setHeader('Content-Type', contentType);
-      res.setHeader('Access-Control-Allow-Origin', '*');
-      const { Readable } = require('stream');
-      const nodeStream = Readable.fromWeb(response.body);
-      withIdleTimeout(nodeStream, () => {
-        if (!res.headersSent) res.status(504).send('Gateway Timeout: stream stalled');
-        else res.destroy();
-        nodeStream.destroy();
-      });
-      nodeStream.pipe(res);
-      return;
-    }
-
-    // --- Force transcode (explicit flag) ---
-    if (forceTranscode) {
-      console.log('[proxy] Transcoding requested (resolved):', resolvedUrl);
-      res.setHeader('Access-Control-Allow-Origin', '*');
-      res.setHeader('Content-Type', 'video/mp4');
-      pipeFfmpeg(spawnFfmpeg(resolvedUrl, true, hostHeader, originalHost, isHttps));
-      return;
-    }
-
-    // --- Smart probe: only fetch-probe explicit HLS URLs (.m3u8) ---
-    const looksLikeHls = streamUrl.includes('.m3u8');
-
-    if (looksLikeHls) {
-      console.log('[proxy] HLS Manifest requested (resolved):', resolvedUrl);
-      const connectTimer = setTimeout(() => abortController.abort(), CONNECT_TIMEOUT_MS);
-      const response = await fetch(resolvedUrl, { headers, signal: abortController.signal });
-      clearTimeout(connectTimer);
-      if (!response.ok) {
-        console.error('[proxy] HLS Manifest fetch failed:', response.status, resolvedUrl);
-        return res.status(response.status).send(`Provider returned ${response.status}`);
-      }
-      const contentType = response.headers.get('content-type');
-      res.setHeader('Access-Control-Allow-Origin', '*');
-      if (contentType) res.setHeader('Content-Type', contentType);
-      const text = await response.text();
-      const baseUrl = new URL(resolvedUrl);
-      const rewritten = text.split(/\r?\n/).map((line) => {
-        const t = line.trim();
-        if (t.startsWith('#') || t === '') return line;
-        try {
-          const abs = t.startsWith('http') ? t : new URL(t, baseUrl.href).href;
-          return `/api/stream-proxy?url=${encodeURIComponent(abs)}&segment=true`;
-        } catch {
-          return line;
-        }
-      });
-      res.send(rewritten.join('\n'));
-    } else {
-      // Non-HLS (MPEG-TS, RTMP wrappers, etc.): go straight to ffmpeg
-      console.log('[proxy] Non-HLS URL — starting ffmpeg stream copy (resolved):', resolvedUrl);
-      res.setHeader('Access-Control-Allow-Origin', '*');
-      res.setHeader('Content-Type', 'video/mp4');
-      pipeFfmpeg(spawnFfmpeg(resolvedUrl, false, hostHeader, originalHost, isHttps));
-    }
+    // --- Direct copy or Transcoding ---
+    console.log('[proxy] Starting ffmpeg stream copy/transcode (resolved):', resolvedUrl);
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Content-Type', 'video/mp4');
+    pipeFfmpeg(spawnFfmpeg(resolvedUrl, forceTranscode));
   } catch (e) {
     if (res.headersSent) return res.destroy();
-    if (e.name === 'AbortError') {
+    if (e.name === 'CanceledError') {
       return res.status(504).send('Gateway Timeout: connection timed out');
     }
     console.error('Stream proxy error:', e.message);

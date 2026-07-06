@@ -237,6 +237,166 @@
   #modal .btn-primary { background: var(--amber); color: #14100c; }
   #modal .btn-secondary { background: var(--surface-2); color: var(--text); }
   #modal-error { color: var(--red); font-size: 12px; margin-top: 6px; display: none; }
+
+  /* ============ TOOLBAR CONTROLS ============ */
+  .size-btn {
+    background: var(--surface-2);
+    border: 1px solid var(--line);
+    color: var(--text-dim);
+    padding: 4px 10px;
+    border-radius: 12px;
+    font-size: 10px;
+    cursor: pointer;
+    font-family: 'IBM Plex Mono', monospace;
+    transition: all 0.15s ease;
+  }
+  .size-btn:hover {
+    border-color: var(--amber);
+    color: var(--text);
+  }
+  .size-btn.active {
+    background: var(--amber);
+    color: #14100c;
+    border-color: var(--amber);
+  }
+
+  /* ============ CHANNEL SIZE LAYOUTS ============ */
+  #channels.size-normal .channel-item {
+    padding: 8px;
+  }
+  #channels.size-normal .channel-item img, #channels.size-normal .channel-item .ph {
+    width: 40px; height: 40px; font-size: 15px;
+  }
+  #channels.size-normal .cname {
+    font-size: 13px;
+  }
+  #channels.size-normal .cgroup {
+    font-size: 11px;
+  }
+
+  #channels.size-large .channel-item {
+    padding: 12px 10px;
+    gap: 14px;
+  }
+  #channels.size-large .channel-item img, #channels.size-large .channel-item .ph {
+    width: 56px; height: 56px; font-size: 20px;
+  }
+  #channels.size-large .cname {
+    font-size: 15px;
+    font-weight: 600;
+  }
+  #channels.size-large .cgroup {
+    font-size: 12px;
+  }
+
+  #channels.size-compact .channel-item {
+    padding: 6px 8px;
+    gap: 8px;
+  }
+  #channels.size-compact .channel-item img, #channels.size-compact .channel-item .ph {
+    width: 24px; height: 24px; font-size: 11px; border-radius: 4px;
+  }
+  #channels.size-compact .cname {
+    font-size: 12px;
+  }
+  #channels.size-compact .cgroup {
+    font-size: 10px;
+  }
+
+  /* ============ CUSTOM DARK SCROLLBARS ============ */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--line);
+    border-radius: 3px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--text-dim);
+  }
+  
+  /* Scrollbar styling for Firefox */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--line) transparent;
+  }
+
+  /* ============ MOBILE RESPONSIVENESS ============ */
+  @media (max-width: 768px) {
+    #hero {
+      padding: 24px;
+      justify-content: center;
+    }
+    h1.headline {
+      font-size: clamp(36px, 10vw, 64px);
+    }
+    .subtext {
+      font-size: 15px;
+      padding: 0 10px;
+      margin-top: 20px;
+    }
+    #enter-btn {
+      margin-top: 30px;
+    }
+    .sources-strip {
+      position: static;
+      margin-top: 40px;
+      flex-direction: column;
+      gap: 16px;
+      align-items: center;
+    }
+    .source-chip {
+      text-align: center;
+    }
+    
+    #app {
+      flex-direction: column;
+    }
+    #main {
+      order: 1;
+      flex: 0 0 auto;
+      width: 100%;
+      height: 56.25vw;
+      max-height: 280px;
+      min-height: 180px;
+    }
+    #main:has(#placeholder:not([style*="display: none"])) {
+      display: none;
+    }
+    #sidebar {
+      order: 2;
+      width: 100%;
+      min-width: 0;
+      flex: 1;
+      min-height: 0;
+      border-right: none;
+      border-top: 1px solid var(--line);
+      display: flex;
+      flex-direction: column;
+    }
+    #browser {
+      flex: 1;
+      min-height: 0;
+      overflow: hidden;
+    }
+    #groups {
+      width: 120px;
+      flex-shrink: 0;
+    }
+    #channels {
+      flex: 1;
+      min-width: 0;
+    }
+    #modal {
+      width: 90%;
+      max-width: 380px;
+      padding: 20px;
+    }
+  }
 </style>
 </head>
 <body>
@@ -259,14 +419,28 @@
 <div id="app">
   <div id="sidebar">
     <div class="panel">
-      <span class="back-link" onclick="backToHero()">&larr; signal</span>
-      <div class="panel-title">Sources <button onclick="openModal()">Add</button></div>
+      <div class="panel-title">
+        <span onclick="toggleSources()" style="cursor:pointer; display:flex; align-items:center; gap:6px; user-select:none;">
+          <span id="sources-toggle-arrow">▼</span> Sources
+        </span>
+        <button onclick="openModal()">Add</button>
+      </div>
       <div id="sources-list"></div>
     </div>
-    <input id="search" placeholder="Search channels...">
+    <div style="padding: 0 18px 10px; display:flex; flex-direction:column; gap:10px;">
+      <input id="search" placeholder="Search channels..." style="margin: 0; width: 100%;">
+      <div id="sidebar-controls" style="display:flex; justify-content:space-between; align-items:center;">
+        <span style="font-family:'IBM Plex Mono', monospace; font-size:10px; color:var(--text-dim); letter-spacing:0.5px;">VIEW DENSITY:</span>
+        <div style="display:flex; gap:6px;">
+          <button class="size-btn" data-size="compact" onclick="setChannelSize('compact')">Compact</button>
+          <button class="size-btn active" data-size="normal" onclick="setChannelSize('normal')">Normal</button>
+          <button class="size-btn" data-size="large" onclick="setChannelSize('large')">Large</button>
+        </div>
+      </div>
+    </div>
     <div id="browser">
       <div id="groups"></div>
-      <div id="channels"></div>
+      <div id="channels" class="size-normal"></div>
     </div>
   </div>
 
@@ -423,7 +597,7 @@ function renderGroups() {
     <div class="group-item ${g === state.activeGroup ? 'active' : ''}" onclick="selectGroup('${g.replace(/'/g,"\\'")}')">${g}</div>
   `).join('');
 }
-function selectGroup(g) { state.activeGroup = g; renderChannels(); }
+function selectGroup(g) { state.activeGroup = g; renderGroups(); renderChannels(); }
 
 let visibleCount = 80;
 let filteredChannels = [];
@@ -521,145 +695,110 @@ function playChannel(sourceId, channelId) {
   if (state.hls) { state.hls.destroy(); state.hls = null; }
   video.src = '';
 
-  const proxyUrl = '/api/stream-proxy?url=' + encodeURIComponent(channel.streamUrl);
+  let proxyUrl = '/api/stream-proxy?url=' + encodeURIComponent(channel.streamUrl);
+  if (channel.referrer) {
+    proxyUrl += '&referer=' + encodeURIComponent(channel.referrer);
+  }
+  if (channel.userAgent) {
+    proxyUrl += '&userAgent=' + encodeURIComponent(channel.userAgent);
+  }
   setStatus('Loading…');
 
-  const isHls = channel.streamUrl.includes('.m3u8') || channel.streamUrl.includes('.m3u');
+  // Populate direct vs transcode options for all streams (unified player)
+  qSelect.innerHTML = `
+    <option value="direct">Source (Direct)</option>
+    <option value="transcode">Transcoded (Bypass)</option>
+  `;
+  document.getElementById('quality-selector-wrap').style.display = 'block';
 
-  if (isHls && Hls.isSupported()) {
-    const hls = new Hls({ maxBufferLength: 30 });
-    state.hls = hls;
-    hls.loadSource(proxyUrl);
-    hls.attachMedia(video);
-    hls.on(Hls.Events.MANIFEST_PARSED, () => { 
-      setStatus(''); 
-      video.play().catch(() => {}); 
+  video.src = proxyUrl;
+
+  // Show clear error on video element failure
+  const onVideoError = () => {
+    clearTimeout(state._loadTimer);
+    video.removeEventListener('canplay', onCanPlay);
+    const code = video.error ? video.error.code : 0;
+
+    // If browser throws decode/format error (e.g. interlaced 1080i or HEVC), auto-fallback to lightweight 540p deinterlaced transcode
+    if (code === 3 || code === 4) {
+      setStatus('Transcoding (Format Fallback)…');
+      qSelect.value = 'transcode';
+      video.src = '';
+      video.load();
+      video.src = proxyUrl + '&transcode=true';
       
-      // Populate quality levels
-      const levels = hls.levels;
-      if (levels && levels.length >= 1) {
-        qSelect.innerHTML = '<option value="-1">Auto</option>';
-        levels.forEach((level, index) => {
-          const name = level.name || (level.height ? `${level.height}p` : `Level ${index}`);
-          const opt = document.createElement('option');
-          opt.value = index;
-          opt.textContent = name;
-          qSelect.appendChild(opt);
-        });
-        document.getElementById('quality-selector-wrap').style.display = 'block';
-      }
-    });
-    hls.on(Hls.Events.ERROR, (event, data) => {
-      if (!data.fatal) return;
-      if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-        const code = data.response && data.response.code;
-        if (code === 403) return fail("This channel is blocking automated access");
-        if (code === 504) return fail("This channel's server isn't responding");
-        hls.startLoad();
-      } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
-        hls.destroy(); state.hls = null;
-        setStatus('Transcoding…');
-        video.src = proxyUrl + '&transcode=true';
-        video.play().catch(() => fail('Failed to load: no supported source found'));
-      } else {
-        fail('Playback failed: ' + data.type);
-      }
-    });
-  } else if (isHls && video.canPlayType('application/vnd.apple.mpegurl')) {
-    video.src = proxyUrl;
-    video.addEventListener('loadedmetadata', () => { setStatus(''); video.play().catch(() => {}); });
-  } else if (!isHls) {
-    // Populate direct vs transcode options for non-HLS streams
-    qSelect.innerHTML = `
-      <option value="direct">Source (Direct)</option>
-      <option value="transcode">Transcoded (Bypass)</option>
-    `;
-    document.getElementById('quality-selector-wrap').style.display = 'block';
-
-    video.src = proxyUrl;
-
-    // Show clear error on video element failure
-    const onVideoError = () => {
-      clearTimeout(state._loadTimer);
-      video.removeEventListener('canplay', onCanPlay);
-      const code = video.error ? video.error.code : 0;
-
-      // If browser throws decode/format error (e.g. interlaced 1080i or HEVC), auto-fallback to lightweight 480p deinterlaced transcode
-      if (code === 3 || code === 4) {
-        setStatus('Transcoding (Interlaced/Format Fallback)…');
-        qSelect.value = 'transcode';
-        video.src = '';
-        video.load();
-        video.src = proxyUrl + '&transcode=true';
+      // Wrap fallback listeners in setTimeout to bypass the synchronous abort error event
+      setTimeout(() => {
         const onFallbackCanPlay = () => {
           setStatus('');
+          hideError();
           video.play().catch(() => fail('Playback error — stream may be offline or blocked'));
         };
         video.addEventListener('canplay', onFallbackCanPlay, { once: true });
         video.addEventListener('error', () => fail('Transcoding failed — stream unreadable'), { once: true });
-      } else if (code === 2) {
-        fail('Network error — stream may be offline or blocked');
-      } else if (code === 1) {
-        fail('Playback aborted');
-      } else {
-        fail('Playback error — stream may be offline or blocked');
-      }
-    };
-    video.addEventListener('error', onVideoError, { once: true });
+      }, 0);
+    } else if (code === 2) {
+      fail('Network error — stream may be offline or blocked');
+    } else if (code === 1) {
+      fail('Playback aborted');
+    } else {
+      fail('Playback error — stream may be offline or blocked');
+    }
+  };
+  video.addEventListener('error', onVideoError, { once: true });
 
-    const onCanPlay = () => {
-      clearTimeout(state._loadTimer);
-      setStatus('');
-      video.removeEventListener('error', onVideoError);
-      video.play().catch(e => {
-        console.warn('Autoplay block or playback issue:', e);
-        fail('Playback blocked. Click inside the player to start.');
-      });
-    };
-    video.addEventListener('canplay', onCanPlay, { once: true });
+  const onCanPlay = () => {
+    clearTimeout(state._loadTimer);
+    setStatus('');
+    video.removeEventListener('error', onVideoError);
+    video.play().catch(e => {
+      console.warn('Autoplay block or playback issue:', e);
+      fail('Playback blocked. Click inside the player to start.');
+    });
+  };
+  video.addEventListener('canplay', onCanPlay, { once: true });
 
-    // 25-second loading timeout
-    state._loadTimer = setTimeout(() => {
-      video.removeEventListener('canplay', onCanPlay);
-      video.removeEventListener('error', onVideoError);
-      if (!video.readyState || video.readyState < 3) {
-        video.src = '';
-        fail('Stream loading timed out. Click "Retry" to try again.');
-      }
-    }, 25000);
-  } else {
-    fail('HLS playback is not supported in this browser');
-  }
+  // 25-second loading timeout
+  state._loadTimer = setTimeout(() => {
+    video.removeEventListener('canplay', onCanPlay);
+    video.removeEventListener('error', onVideoError);
+    if (!video.readyState || video.readyState < 3) {
+      video.src = '';
+      fail('Stream loading timed out. Click "Retry" to try again.');
+    }
+  }, 25000);
   function fail(msg) { setStatus(''); showError(msg); }
 }
 
 function changeQuality(val) {
-  if (state.hls) {
-    state.hls.currentLevel = parseInt(val, 10);
-  } else {
-    const src = currentSource();
-    const channel = src && src.channels.find(c => c.id === state.activeChannelId);
-    if (!channel) return;
-    const proxyUrl = '/api/stream-proxy?url=' + encodeURIComponent(channel.streamUrl);
-    const video = document.getElementById('video');
-    
-    if (state.hls) { state.hls.destroy(); state.hls = null; }
-    
-    if (val === 'transcode') {
-      setStatus('Transcoding…');
-      video.src = proxyUrl + '&transcode=true';
-    } else {
-      setStatus('Loading…');
-      video.src = proxyUrl;
-    }
-    
-    const onCanPlay = () => {
-      setStatus('');
-      video.play().catch(e => console.warn("Play failed:", e));
-      video.removeEventListener('canplay', onCanPlay);
-    };
-    video.addEventListener('canplay', onCanPlay);
+  const src = currentSource();
+  const channel = src && src.channels.find(c => c.id === state.activeChannelId);
+  if (!channel) return;
+  let proxyUrl = '/api/stream-proxy?url=' + encodeURIComponent(channel.streamUrl);
+  if (channel.referrer) {
+    proxyUrl += '&referer=' + encodeURIComponent(channel.referrer);
   }
+  if (channel.userAgent) {
+    proxyUrl += '&userAgent=' + encodeURIComponent(channel.userAgent);
+  }
+  const video = document.getElementById('video');
+  
+  if (state.hls) { state.hls.destroy(); state.hls = null; }
+  
+  if (val === 'transcode') {
+    setStatus('Transcoding…');
+    video.src = proxyUrl + '&transcode=true';
+  } else {
+    setStatus('Loading…');
+    video.src = proxyUrl;
+  }
+  
+  const onCanPlay = () => {
+    setStatus('');
+    video.play().catch(e => console.warn("Play failed:", e));
+    video.removeEventListener('canplay', onCanPlay);
+  };
+  video.addEventListener('canplay', onCanPlay);
 }
 
 // ---------- IndexedDB Storage Helpers ----------
@@ -710,8 +849,58 @@ async function loadSourcesFromDB() {
   }
 }
 
+// ---------- Custom Interactive Controls ----------
+function toggleSources(forceState) {
+  const list = document.getElementById('sources-list');
+  const arrow = document.getElementById('sources-toggle-arrow');
+  if (!list || !arrow) return;
+  
+  const isHidden = list.style.display === 'none';
+  const shouldHide = forceState !== undefined ? forceState : !isHidden;
+  
+  if (shouldHide) {
+    list.style.display = 'none';
+    arrow.textContent = '▶';
+    localStorage.setItem('sources_collapsed', 'true');
+  } else {
+    list.style.display = 'block';
+    arrow.textContent = '▼';
+    localStorage.setItem('sources_collapsed', 'false');
+  }
+}
+
+function setChannelSize(size) {
+  const container = document.getElementById('channels');
+  if (!container) return;
+  container.className = '';
+  container.classList.add('size-' + size);
+  
+  document.querySelectorAll('.size-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.size === size);
+  });
+  localStorage.setItem('channel_size', size);
+}
+
 // Load saved sources on page load
 window.addEventListener('DOMContentLoaded', async () => {
+  // Load collapse state and channel list size settings
+  const sourcesCollapsed = localStorage.getItem('sources_collapsed') === 'true';
+  if (sourcesCollapsed) {
+    toggleSources(true);
+  }
+  
+  const savedSize = localStorage.getItem('channel_size') || 'normal';
+  setChannelSize(savedSize);
+
+  // Clear loading message and error banner when the video successfully plays
+  const videoEl = document.getElementById('video');
+  if (videoEl) {
+    videoEl.addEventListener('playing', () => {
+      hideError();
+      setStatus('');
+    });
+  }
+
   const saved = await loadSourcesFromDB();
   if (saved && saved.length > 0) {
     state.sources = saved;
