@@ -22,10 +22,15 @@ if (!FFMPEG) {
   if (fs.existsSync(defaultWinPath)) {
     FFMPEG = defaultWinPath;
   } else {
-    try {
-      FFMPEG = require('@ffmpeg-installer/ffmpeg').path;
-    } catch (e) {
+    // Prioritize system-wide ffmpeg on Linux (Render) to guarantee GPL libx264 support
+    if (process.platform === 'linux') {
       FFMPEG = 'ffmpeg';
+    } else {
+      try {
+        FFMPEG = require('@ffmpeg-installer/ffmpeg').path;
+      } catch (e) {
+        FFMPEG = 'ffmpeg';
+      }
     }
   }
 }
@@ -49,34 +54,7 @@ async function probeUrl(url) {
   }
 }
 
-// Pre-resolve hostname to IP to bypass static ffmpeg binary DNS resolution bugs in Docker/Render container sandboxes
-async function resolveUrlToIp(urlStr) {
-  try {
-    const parsed = new URL(urlStr);
-    const hostname = parsed.hostname;
-    const isHttps = parsed.protocol === 'https:';
-    
-    if (/^[0-9.]+$/.test(hostname) || hostname.includes(':')) {
-      return { url: urlStr, hostHeader: null, originalHost: hostname, isHttps };
-    }
 
-    const lookup = await dns.lookup(hostname);
-    if (lookup && lookup.address) {
-      const ip = lookup.address;
-      const port = parsed.port ? `:${parsed.port}` : '';
-      parsed.host = `${ip}${port}`;
-      return {
-        url: parsed.href,
-        hostHeader: `Host: ${hostname}\r\n`,
-        originalHost: hostname,
-        isHttps
-      };
-    }
-  } catch (e) {
-    console.error('[DNS] Failed to resolve:', urlStr, e.message);
-  }
-  return { url: urlStr, hostHeader: null, originalHost: null, isHttps: urlStr.startsWith('https') };
-}
 
 function err(category, message, retryable) {
   return { error: { category, message, retryable } };
@@ -204,23 +182,14 @@ app.get('/api/stream-proxy', async (req, res) => {
 
   // Helper: spawn ffmpeg. Supports fast stream copy (default) or full transcoding (fallback).
   // Includes optimized probe & delay flags for instant startup.
-  function spawnFfmpeg(url, forceTranscode, hostHeader, originalHost, isHttps) {
-    const headersStr = (hostHeader || '') + `User-Agent: VLC/3.0.18 LibVLC/3.0.18\r\nAccept: */*\r\n`;
-    
+  function spawnFfmpeg(url, forceTranscode) {
     const args = [
       '-reconnect', '1',
       '-reconnect_streamed', '1',
       '-reconnect_delay_max', '5',
-      '-headers', headersStr,
+      '-user_agent', 'VLC/3.0.18 LibVLC/3.0.18',
+      '-headers', 'Accept: */*\r\n',
     ];
-
-    // Fix HTTPS / TLS SNI verification gap for IP-routed URLs
-    if (isHttps && originalHost) {
-      args.push(
-        '-tls_host', originalHost,
-        '-tls_verify', '0'
-      );
-    }
 
     args.push(
       '-fflags', '+genpts+igndts+discardcorrupt+nobuffer',
@@ -325,8 +294,7 @@ app.get('/api/stream-proxy', async (req, res) => {
     if (forceTranscode) {
       res.setHeader('Access-Control-Allow-Origin', '*');
       res.setHeader('Content-Type', 'video/mp4');
-      const { url: resolvedUrl, hostHeader, originalHost, isHttps } = await resolveUrlToIp(streamUrl);
-      pipeFfmpeg(spawnFfmpeg(resolvedUrl, true, hostHeader, originalHost, isHttps));
+      pipeFfmpeg(spawnFfmpeg(streamUrl, true));
       return;
     }
 
@@ -364,8 +332,7 @@ app.get('/api/stream-proxy', async (req, res) => {
       console.log('[proxy] Non-HLS URL — starting ffmpeg stream copy:', streamUrl);
       res.setHeader('Access-Control-Allow-Origin', '*');
       res.setHeader('Content-Type', 'video/mp4');
-      const { url: resolvedUrl, hostHeader, originalHost, isHttps } = await resolveUrlToIp(streamUrl);
-      pipeFfmpeg(spawnFfmpeg(resolvedUrl, false, hostHeader, originalHost, isHttps));
+      pipeFfmpeg(spawnFfmpeg(streamUrl, false));
     }
   } catch (e) {
     if (res.headersSent) return res.destroy();
