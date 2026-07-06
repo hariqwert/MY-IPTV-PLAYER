@@ -318,7 +318,6 @@ app.get('/api/stream-proxy', async (req, res) => {
         '-preset', 'ultrafast',
         '-tune', 'zerolatency',
         '-crf', '26',
-        '-g', '25',
         '-vf', 'scale=-2:540',
         '-c:a', 'aac', '-b:a', '128k'
       );
