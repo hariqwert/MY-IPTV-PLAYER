@@ -2,9 +2,6 @@
 // M3U parsing (URL + upload) + a CORS/codec/timeout-hardened stream proxy.
 // Run: npm install && node server.js  (http://localhost:8080)
 
-// Disable TLS reject unauthorized globally to prevent Kaspersky SSL interception blocks
-process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
-
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
@@ -14,38 +11,12 @@ const axios = require('axios');
 const dns = require('dns');
 const dnsPromises = require('dns').promises;
 const net = require('net');
-const https = require('https');
 const dnsResolver = new dnsPromises.Resolver();
 dnsResolver.setServers(['8.8.8.8', '1.1.1.1']);
 
-// Resolve host via Google DNS over HTTPS (DoH) over port 443 to bypass UDP blocks and hijacking
-function resolveHostDoh(hostname) {
-  return new Promise((resolve) => {
-    const url = `https://dns.google/resolve?name=${encodeURIComponent(hostname)}&type=A`;
-    https.get(url, { rejectUnauthorized: false, timeout: 3000 }, (res) => {
-      let data = '';
-      res.on('data', (chunk) => data += chunk);
-      res.on('end', () => {
-        try {
-          const json = JSON.parse(data);
-          if (json && json.Answer) {
-            const aRecords = json.Answer.filter(r => r.type === 1);
-            if (aRecords.length > 0) {
-              resolve(aRecords.map(r => r.data));
-              return;
-            }
-          }
-        } catch (e) {}
-        resolve(null);
-      });
-    }).on('error', () => {
-      resolve(null);
-    });
-  });
-}
-
 // Override dns.lookup globally to bypass bad OS DNS servers / timeouts
 const originalLookup = dns.lookup;
+let inLookup = false;
 dns.lookup = function(hostname, options, callback) {
   if (typeof options === 'function') {
     callback = options;
@@ -54,9 +25,14 @@ dns.lookup = function(hostname, options, callback) {
     options = {};
   }
 
-  // Try DoH first (safe from UDP firewalls and local hijacking)
-  resolveHostDoh(hostname)
+  if (inLookup) {
+    return originalLookup(hostname, options, callback);
+  }
+
+  inLookup = true;
+  dnsResolver.resolve4(hostname)
     .then(ips => {
+      inLookup = false;
       if (ips && ips.length > 0) {
         if (options.all) {
           const addresses = ips.map(ip => ({ address: ip, family: 4 }));
@@ -65,26 +41,11 @@ dns.lookup = function(hostname, options, callback) {
           callback(null, ips[0], 4);
         }
       } else {
-        // Fallback 1: Google DNS standard resolver
-        dnsResolver.resolve4(hostname)
-          .then(ips => {
-            if (ips && ips.length > 0) {
-              if (options.all) {
-                const addresses = ips.map(ip => ({ address: ip, family: 4 }));
-                callback(null, addresses);
-              } else {
-                callback(null, ips[0], 4);
-              }
-            } else {
-              originalLookup(hostname, options, callback);
-            }
-          })
-          .catch(() => {
-            originalLookup(hostname, options, callback);
-          });
+        originalLookup(hostname, options, callback);
       }
     })
-    .catch(() => {
+    .catch(err => {
+      inLookup = false;
       originalLookup(hostname, options, callback);
     });
 };
@@ -318,7 +279,6 @@ app.get('/api/stream-proxy', async (req, res) => {
   const forceTranscode = req.query.transcode === 'true';
   const referer = req.query.referer || req.query.referrer;
   const userAgentParam = req.query.userAgent || req.query.useragent;
-  const format = req.query.format || 'mp4'; // 'mp4' or 'mpegts'
 
   if (!streamUrl || typeof streamUrl !== 'string') {
     return res.status(400).send('Missing url parameter');
@@ -364,12 +324,12 @@ app.get('/api/stream-proxy', async (req, res) => {
     console.warn('[proxy-dns-bypass] DNS bypass resolution error:', dnsErr.message);
   }
 
-  console.log(`[proxy] Starting ffmpeg stream copy/transcode (format: ${format}, resolved IP):`, ffmpegUrl);
-  const ffmpeg = spawnFfmpeg(ffmpegUrl, forceTranscode, hostHeader, format);
+  console.log('[proxy] Starting ffmpeg stream copy/transcode (resolved IP):', ffmpegUrl);
+  const ffmpeg = spawnFfmpeg(ffmpegUrl, forceTranscode, hostHeader);
 
   if (res.socket) res.socket.setNoDelay(true);
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Content-Type', format === 'mpegts' ? 'video/mp2t' : 'video/mp4');
+  res.setHeader('Content-Type', 'video/mp4');
   res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
   res.setHeader('Pragma', 'no-cache');
   res.setHeader('Expires', '0');
@@ -452,7 +412,7 @@ app.get('/api/stream-proxy', async (req, res) => {
     }
   });
 
-  function spawnFfmpeg(url, forceTranscode, hostHeader, outFormat) {
+  function spawnFfmpeg(url, forceTranscode, hostHeader) {
     const ua = userAgentParam || 'VLC/3.0.18 LibVLC/3.0.18';
     let headersStr = `User-Agent: ${ua}\r\nAccept: */*\r\n`;
     if (referer) {
@@ -471,6 +431,7 @@ app.get('/api/stream-proxy', async (req, res) => {
     ];
 
     args.push(
+      '-re',
       '-fflags', '+genpts+igndts+discardcorrupt+nobuffer',
       '-correct_ts_overflow', '1',
       '-avoid_negative_ts', 'make_zero',
@@ -492,22 +453,14 @@ app.get('/api/stream-proxy', async (req, res) => {
     } else {
       args.push(
         '-c:v', 'copy',
-        '-c:a', 'copy'
+        '-c:a', 'aac', '-b:a', '128k'
       );
     }
 
-    if (outFormat === 'mpegts') {
-      args.push(
-        '-f', 'mpegts',
-        'pipe:1'
-      );
-    } else {
-      args.push(
-        '-f', 'mp4',
-        '-movflags', 'frag_keyframe+empty_moov',
-        'pipe:1'
-      );
-    }
+    args.push(
+      '-f', 'mp4', '-movflags', 'frag_keyframe+empty_moov',
+      'pipe:1'
+    );
 
     return spawn(FFMPEG, args);
   }
