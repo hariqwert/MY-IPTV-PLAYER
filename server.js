@@ -313,9 +313,59 @@ app.get('/api/internal-stream', async (req, res) => {
     res.setHeader('Content-Type', 'video/mp2t');
     res.setHeader('Access-Control-Allow-Origin', '*');
     
-    response.data.pipe(res);
+    // Rate limiter variables
+    const maxBytesPerSecond = 750 * 1024; // 750 KB/s limit (approx 6 Mbps)
+    let bytesInCurrentSecond = 0;
+    let periodStart = Date.now();
+    let isPausedForBackpressure = false;
+    let isPausedForRateLimit = false;
+
+    const updatePauseState = () => {
+      const shouldPause = isPausedForBackpressure || isPausedForRateLimit;
+      if (shouldPause) {
+        if (!response.data.isPaused()) response.data.pause();
+      } else {
+        if (response.data.isPaused()) response.data.resume();
+      }
+    };
+
+    response.data.on('data', (chunk) => {
+      const ok = res.write(chunk);
+      if (!ok) {
+        isPausedForBackpressure = true;
+        updatePauseState();
+      }
+
+      bytesInCurrentSecond += chunk.length;
+      const now = Date.now();
+      const elapsed = now - periodStart;
+
+      if (elapsed >= 1000) {
+        periodStart = now;
+        bytesInCurrentSecond = chunk.length;
+      } else if (bytesInCurrentSecond > maxBytesPerSecond) {
+        if (!isPausedForRateLimit) {
+          isPausedForRateLimit = true;
+          updatePauseState();
+
+          const timeToNextPeriod = 1000 - elapsed;
+          setTimeout(() => {
+            isPausedForRateLimit = false;
+            periodStart = Date.now();
+            bytesInCurrentSecond = 0;
+            updatePauseState();
+          }, timeToNextPeriod);
+        }
+      }
+    });
+
+    res.on('drain', () => {
+      isPausedForBackpressure = false;
+      updatePauseState();
+    });
 
     response.data.on('end', () => {
+      if (!res.writableEnded) res.end();
       console.log('[internal-stream] Stream ended cleanly.');
     });
 
