@@ -97,3 +97,11 @@ During the web player recovery phase, we analyzed, resolved, and documented the 
 * **Description**: Browser player console logged `Non MPEG-TS/FLV, Unsupported media type!`.
 * **Root-Cause**: FFmpeg was outputting fragmented MP4 (`-f mp4` with `-movflags frag_keyframe`) while the frontend `mpegts.js` engine expected a pure MPEG-TS (`video/mp2t`) container header.
 * **Fix**: Standardized the FFmpeg command output format flag to `-f mpegts` and set the HTTP response headers content type to `video/mp2t`.
+
+### Case 5: Broken Fallback quality-switch (Hanging on a Single Frame)
+* **Description**: Switching to Transcoded (Bypass) mode failed to work when the player got stuck on a single frame in Original quality.
+* **Root-Cause**: 
+  1. Original quality copied `mp2` audio directly, which browsers cannot decode, causing a browser decoder crash (stuck frame).
+  2. The code registered error listeners on invalid event strings: `player.on(mpegts.ErrorTypes.MEDIA_ERROR, ...)` and `player.on(mpegts.ErrorTypes.NETWORK_ERROR, ...)`. In `mpegts.js`, there are no such event names; the player fires a single unified `'error'` event (`mpegts.Events.ERROR`) and passes the error type as the callback parameter.
+  3. Consequently, the media decoder crash went unhandled, the automatic quality fallback never executed, and the quality dropdown became unresponsive because the player state stayed in a crashed loop.
+* **Fix**: Consolidated all error type handlers under the single unified `'error'` (`mpegts.Events.ERROR`) listener in `index.html`. It now correctly inspects the error type argument and triggers `fallbackToTranscode()` or restarts the stream instantly.
