@@ -277,147 +277,157 @@ app.get('/api/stream-proxy', async (req, res) => {
   }
 
   const abortController = new AbortController();
-  req.on('close', () => abortController.abort());
+  let clientDisconnected = false;
 
-  // Pre-resolve and follow redirects for the stream URL (maintaining domain name)
-  const { url: resolvedUrl, originalHost, isHttps } = await followRedirectsAndResolve(streamUrl, referer, userAgentParam);
+  req.on('close', () => {
+    clientDisconnected = true;
+    abortController.abort();
+    cleanup();
+  });
 
-  const headers = { 'User-Agent': userAgentParam || 'VLC/3.0.18 LibVLC/3.0.18', Accept: '*/*' };
-  if (referer) {
-    headers['Referer'] = referer;
+  const ua = userAgentParam || 'VLC/3.0.18 LibVLC/3.0.18';
+  const args = [
+    '-f', 'mpegts',
+    '-fflags', '+genpts+igndts+discardcorrupt+nobuffer',
+    '-correct_ts_overflow', '1',
+    '-avoid_negative_ts', 'make_zero',
+    '-flags', '+low_delay+global_header',
+    '-analyzeduration', '1000000',
+    '-probesize', '1000000',
+    '-i', 'pipe:0'
+  ];
+
+  if (forceTranscode) {
+    args.push(
+      '-c:v', 'libx264',
+      '-preset', 'ultrafast',
+      '-tune', 'zerolatency',
+      '-crf', '26',
+      '-vf', 'scale=-2:540',
+      '-c:a', 'aac', '-b:a', '128k'
+    );
+  } else {
+    args.push(
+      '-c:v', 'copy',
+      '-c:a', 'aac', '-b:a', '128k'
+    );
   }
 
-  // Helper: spawn ffmpeg. Supports fast stream copy (default) or full transcoding (fallback).
-  // Includes optimized probe & delay flags for instant startup.
-  function spawnFfmpeg(url, forceTranscode, hostHeader) {
-    const ua = userAgentParam || 'VLC/3.0.18 LibVLC/3.0.18';
-    let headersStr = `User-Agent: ${ua}\r\nAccept: */*\r\n`;
-    if (referer) {
-      headersStr += `Referer: ${referer}\r\n`;
-    }
-    if (hostHeader) {
-      headersStr += `Host: ${hostHeader}\r\n`;
-    }
-    
-    const args = [
-      '-reconnect', '1',
-      '-reconnect_streamed', '1',
-      '-reconnect_delay_max', '5',
-      '-headers', headersStr,
-    ];
+  args.push(
+    '-f', 'mp4', '-movflags', 'frag_keyframe+empty_moov',
+    'pipe:1'
+  );
 
-    args.push(
-      '-fflags', '+genpts+igndts+discardcorrupt+nobuffer',
-      '-correct_ts_overflow', '1',
-      '-avoid_negative_ts', 'make_zero',
-      '-flags', '+low_delay+global_header',
-      '-analyzeduration', '1000000',
-      '-probesize', '1000000',
-      '-i', url
-    );
+  console.log('[proxy-ffmpeg] Spawning ffmpeg stdin transcoder, forceTranscode:', forceTranscode);
+  const ffmpeg = spawn(FFMPEG, args);
 
-    if (forceTranscode) {
-      args.push(
-        '-c:v', 'libx264',
-        '-preset', 'ultrafast',
-        '-tune', 'zerolatency',
-        '-crf', '26',
-        '-vf', 'scale=-2:540',
-        '-c:a', 'aac', '-b:a', '128k'
-      );
-    } else {
-      args.push(
-        '-c:v', 'copy',                // copy video (extremely fast, low CPU)
-        '-c:a', 'aac', '-b:a', '128k'  // convert audio to AAC (browser-safe)
-      );
-    }
+  if (res.socket) res.socket.setNoDelay(true);
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Content-Type', 'video/mp4');
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
 
-    args.push(
-      '-f', 'mp4', '-movflags', 'frag_keyframe+empty_moov',
-      'pipe:1'
-    );
+  let currentResponseStream = null;
+  let stderrBuf = '';
+  ffmpeg.stderr.on('data', (d) => { stderrBuf += d.toString(); });
 
-    return spawn(FFMPEG, args);
-  }
+  let gotData = false;
+  ffmpeg.stdout.once('data', () => { gotData = true; });
 
-  function pipeFfmpeg(ffmpeg) {
-    if (res.socket) res.socket.setNoDelay(true);
-    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-    res.setHeader('Pragma', 'no-cache');
-    res.setHeader('Expires', '0');
-
-    ffmpeg.on('error', (e) => {
-      console.error('ffmpeg process error:', e.message);
-      if (!res.headersSent) res.status(e.code === 'ENOENT' ? 500 : 502).send('Transcoder error: ' + e.message);
-    });
-    let stderrBuf = '';
-    ffmpeg.stderr.on('data', (d) => { stderrBuf += d.toString(); });
-    let gotData = false;
-    ffmpeg.stdout.once('data', () => { gotData = true; });
-    // Kill ffmpeg if it produces no data within startup timeout
-    const startupTimer = setTimeout(() => {
-      if (!gotData) {
-        console.error('[ffmpeg] startup timeout — no data after', FFMPEG_STARTUP_TIMEOUT_MS, 'ms');
-        console.error('[ffmpeg] startup stderr log:\n', stderrBuf);
-        try { ffmpeg.kill('SIGKILL'); } catch (e) {}
-        if (!res.headersSent) res.status(504).send('Stream timeout: source unreachable or blocked by provider');
-        else res.destroy();
-      }
-    }, FFMPEG_STARTUP_TIMEOUT_MS);
-    ffmpeg.stdout.once('data', () => clearTimeout(startupTimer));
-    ffmpeg.on('close', () => clearTimeout(startupTimer));
-    withIdleTimeout(ffmpeg.stdout, () => {
-      if (!res.headersSent) res.status(504).send('Gateway Timeout: stream stalled');
+  const startupTimer = setTimeout(() => {
+    if (!gotData) {
+      console.error('[ffmpeg] startup timeout — no data after 15 seconds');
+      console.error('[ffmpeg] startup stderr log:\n', stderrBuf);
+      cleanup();
+      if (!res.headersSent) res.status(504).send('Stream timeout');
       else res.destroy();
-      try { ffmpeg.kill('SIGKILL'); } catch (e) {}
-    });
-    ffmpeg.stdout.pipe(res);
-    ffmpeg.on('close', (code) => {
-      if (!gotData && code !== 0 && !res.headersSent) {
-        console.error('ffmpeg failed:', stderrBuf.slice(-2000));
-        res.status(502).send('Transcoding failed: source unreadable');
-      }
-    });
-    req.on('close', () => { try { ffmpeg.kill('SIGKILL'); } catch (e) {} });
-  }
+    }
+  }, FFMPEG_STARTUP_TIMEOUT_MS);
 
-  try {
-    // --- Direct copy or Transcoding ---
-    let ffmpegUrl = resolvedUrl;
-    let hostHeader = null;
+  ffmpeg.stdout.pipe(res);
 
-    try {
-      const parsedUrl = new URL(resolvedUrl);
-      if (!net.isIP(parsedUrl.hostname) && parsedUrl.hostname !== 'localhost') {
-        const ip = await new Promise((resolve) => {
-          dns.lookup(parsedUrl.hostname, (err, address) => {
-            if (err) resolve(null);
-            else resolve(address);
+  const cleanup = () => {
+    clearTimeout(startupTimer);
+    if (currentResponseStream) {
+      try { currentResponseStream.destroy(); } catch (e) {}
+    }
+    try { ffmpeg.kill('SIGKILL'); } catch (e) {}
+  };
+
+  ffmpeg.on('close', (code) => {
+    console.log(`[proxy-ffmpeg] Process exited with code ${code}`);
+    cleanup();
+    if (!gotData && code !== 0 && !res.headersSent) {
+      res.status(502).send('Transcoding failed');
+    } else {
+      if (!res.writableEnded) res.end();
+    }
+  });
+
+  // Upstream fetch loop
+  (async () => {
+    let reconnectCount = 0;
+    const maxReconnects = 10000;
+
+    while (!clientDisconnected && reconnectCount < maxReconnects) {
+      try {
+        console.log(`[proxy-ffmpeg-fetch] Fetching upstream, attempt ${reconnectCount + 1}`);
+        const { url: resolvedUrl } = await followRedirectsAndResolve(streamUrl, referer, userAgentParam);
+
+        if (clientDisconnected) break;
+
+        const headers = { 'User-Agent': ua, Accept: '*/*' };
+        if (referer) headers['Referer'] = referer;
+
+        const fetchAbort = new AbortController();
+        const connectTimer = setTimeout(() => fetchAbort.abort(), CONNECT_TIMEOUT_MS);
+
+        const response = await axios.get(resolvedUrl, {
+          headers,
+          responseType: 'stream',
+          signal: fetchAbort.signal
+        });
+        clearTimeout(connectTimer);
+
+        if (clientDisconnected) {
+          response.data.destroy();
+          break;
+        }
+
+        currentResponseStream = response.data;
+        console.log(`[proxy-ffmpeg-connect] Upstream connected. Status: ${response.status}`);
+
+        // Pipe upstream data directly to ffmpeg stdin
+        response.data.pipe(ffmpeg.stdin, { end: false });
+
+        await new Promise((resolve) => {
+          response.data.on('end', () => {
+            console.log('[proxy-ffmpeg-stream] Upstream ended (natural end).');
+            resolve();
+          });
+          response.data.on('error', (err) => {
+            console.warn('[proxy-ffmpeg-stream] Upstream error:', err.message);
+            resolve();
+          });
+          response.data.on('close', () => {
+            resolve();
           });
         });
-        if (ip) {
-          console.log(`[proxy-dns-bypass] Resolved ffmpeg URL host ${parsedUrl.hostname} -> ${ip}`);
-          hostHeader = parsedUrl.hostname;
-          parsedUrl.hostname = ip;
-          ffmpegUrl = parsedUrl.href;
-        }
-      }
-    } catch (dnsErr) {
-      console.warn('[proxy-dns-bypass] DNS bypass resolution error:', dnsErr.message);
-    }
 
-    console.log('[proxy] Starting ffmpeg stream copy/transcode (resolved):', ffmpegUrl);
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Content-Type', 'video/mp4');
-    pipeFfmpeg(spawnFfmpeg(ffmpegUrl, forceTranscode, hostHeader));
-  } catch (e) {
-    if (res.headersSent) return res.destroy();
-    if (e.name === 'CanceledError') {
-      return res.status(504).send('Gateway Timeout: connection timed out');
+        if (clientDisconnected) break;
+        await new Promise(r => setTimeout(r, 500));
+        reconnectCount++;
+      } catch (err) {
+        console.error('[proxy-ffmpeg-error] Fetch loop error:', err.message);
+        if (clientDisconnected) break;
+        await new Promise(r => setTimeout(r, 2000));
+        reconnectCount++;
+      }
     }
-    console.error('Stream proxy error:', e.message);
-    res.status(502).send('Proxy error: ' + e.message);
-  }
+    // Close stdin when the loop ends
+    try { ffmpeg.stdin.end(); } catch (e) {}
+  })();
 });
 
 app.get('/api/stream-proxy-raw', async (req, res) => {
