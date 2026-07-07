@@ -762,11 +762,14 @@ function playChannel(sourceId, channelId) {
 
   // Clean up any active players
   if (state.hls) { state.hls.destroy(); state.hls = null; }
-  if (state.mpegtsPlayer) {
-    state.mpegtsPlayer.unload();
-    state.mpegtsPlayer.detachMediaElement();
-    state.mpegtsPlayer.destroy();
-    state.mpegtsPlayer = null;
+  const oldMpegtsPlayer = state.mpegtsPlayer;
+  state.mpegtsPlayer = null;
+  if (oldMpegtsPlayer) {
+    setTimeout(() => {
+      try { oldMpegtsPlayer.unload(); } catch (e) {}
+      try { oldMpegtsPlayer.detachMediaElement(); } catch (e) {}
+      try { oldMpegtsPlayer.destroy(); } catch (e) {}
+    }, 0);
   }
   if (state._nativeErrorListener) {
     video.removeEventListener('error', state._nativeErrorListener);
@@ -819,12 +822,15 @@ function playChannel(sourceId, channelId) {
     video.removeAttribute('src');
     try { video.load(); } catch (e) {}
 
-    // 2. Now safely dispose of mpegts.js instance
-    if (state.mpegtsPlayer) {
-      try { state.mpegtsPlayer.unload(); } catch (e) {}
-      try { state.mpegtsPlayer.detachMediaElement(); } catch (e) {}
-      try { state.mpegtsPlayer.destroy(); } catch (e) {}
-      state.mpegtsPlayer = null;
+    // 2. Now safely dispose of mpegts.js instance deferred to prevent stack crashes
+    const oldMpegtsPlayer = state.mpegtsPlayer;
+    state.mpegtsPlayer = null;
+    if (oldMpegtsPlayer) {
+      setTimeout(() => {
+        try { oldMpegtsPlayer.unload(); } catch (e) {}
+        try { oldMpegtsPlayer.detachMediaElement(); } catch (e) {}
+        try { oldMpegtsPlayer.destroy(); } catch (e) {}
+      }, 0);
     }
     if (state._nativeErrorListener) {
       video.removeEventListener('error', state._nativeErrorListener);
@@ -1004,12 +1010,15 @@ function changeQuality(val) {
   
   const video = document.getElementById('video');
   
-  // Cleanup any active mpegts player
-  if (state.mpegtsPlayer) {
-    state.mpegtsPlayer.unload();
-    state.mpegtsPlayer.detachMediaElement();
-    state.mpegtsPlayer.destroy();
-    state.mpegtsPlayer = null;
+  // Cleanup any active mpegts player deferred to prevent stack crashes
+  const oldMpegtsPlayer = state.mpegtsPlayer;
+  state.mpegtsPlayer = null;
+  if (oldMpegtsPlayer) {
+    setTimeout(() => {
+      try { oldMpegtsPlayer.unload(); } catch (e) {}
+      try { oldMpegtsPlayer.detachMediaElement(); } catch (e) {}
+      try { oldMpegtsPlayer.destroy(); } catch (e) {}
+    }, 0);
   }
   if (state._nativeErrorListener) {
     video.removeEventListener('error', state._nativeErrorListener);
