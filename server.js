@@ -491,69 +491,11 @@ app.get('/api/stream-proxy-raw', async (req, res) => {
   let responseStream = null;
   let bytesReceived = 0;
   let totalBytesReceived = 0;
-  
-  const MAX_BUFFER_SIZE_BYTES = 3 * 1024 * 1024; // 3MB
-  let bufferQueue = [];
-  let bufferSizeBytes = 0;
-  let isWriting = false;
 
   const interval = setInterval(() => {
-    console.log(`[proxy-raw-throughput] Avg speed: ${(bytesReceived / 5 / 1024).toFixed(2)} KB/s. Total bytes: ${totalBytesReceived}. Buffer size: ${(bufferSizeBytes / 1024).toFixed(2)} KB`);
+    console.log(`[proxy-raw-throughput] Avg speed: ${(bytesReceived / 5 / 1024).toFixed(2)} KB/s. Total bytes: ${totalBytesReceived}.`);
     bytesReceived = 0;
   }, 5000);
-
-  const cleanup = () => {
-    clearInterval(interval);
-    if (responseStream) {
-      try { responseStream.destroy(); } catch (e) {}
-    }
-  };
-
-  req.on('close', cleanup);
-
-  const writeNext = () => {
-    if (isWriting || clientDisconnected) return;
-    if (bufferQueue.length === 0) return;
-
-    isWriting = true;
-    const chunk = bufferQueue.shift();
-    bufferSizeBytes -= chunk.length;
-
-    // Write chunk to client
-    const ok = res.write(chunk);
-    if (ok) {
-      isWriting = false;
-      setImmediate(writeNext);
-    } else {
-      res.once('drain', () => {
-        isWriting = false;
-        writeNext();
-      });
-    }
-  };
-
-  const addChunk = (chunk) => {
-    bufferQueue.push(chunk);
-    bufferSizeBytes += chunk.length;
-    
-    // Drop oldest chunks if buffer size limit is exceeded
-    while (bufferSizeBytes > MAX_BUFFER_SIZE_BYTES && bufferQueue.length > 0) {
-      const removed = bufferQueue.shift();
-      bufferSizeBytes -= removed.length;
-    }
-    
-    writeNext();
-  };
-
-  const clientRange = req.headers.range;
-  const headers = {
-    'User-Agent': userAgentParam || 'VLC/3.0.18 LibVLC/3.0.18',
-    'Accept': '*/*',
-    'Accept-Encoding': 'identity',
-    'Range': clientRange || 'bytes=0-',
-    'Connection': 'keep-alive',
-    ...(referer ? { 'Referer': referer } : {})
-  };
 
   let activeStream = null;
 
@@ -568,10 +510,19 @@ app.get('/api/stream-proxy-raw', async (req, res) => {
     }
   };
 
-  const originalCleanup = cleanup;
-  cleanup = () => {
-    originalCleanup();
+  const cleanup = () => {
+    clearInterval(interval);
     cleanupActiveStream();
+  };
+
+  const clientRange = req.headers.range;
+  const headers = {
+    'User-Agent': userAgentParam || 'VLC/3.0.18 LibVLC/3.0.18',
+    'Accept': '*/*',
+    'Accept-Encoding': 'identity',
+    'Range': clientRange || 'bytes=0-',
+    'Connection': 'keep-alive',
+    ...(referer ? { 'Referer': referer } : {})
   };
 
   async function startStreaming() {
@@ -588,28 +539,43 @@ app.get('/api/stream-proxy-raw', async (req, res) => {
       activeStream = response.data;
       console.log(`[proxy-raw-connect] Upstream connected. Status: ${response.status}`);
 
+      // FIXED: Implement proper Node.js stream backpressure instead of dropping chunks
       activeStream.on('data', (chunk) => {
         bytesReceived += chunk.length;
         totalBytesReceived += chunk.length;
-        addChunk(chunk);
+        
+        if (!clientDisconnected) {
+          const writeOk = res.write(chunk);
+          // If the client's network buffer is full, pause the upstream download
+          if (!writeOk) {
+            activeStream.pause();
+          }
+        }
+      });
+
+      // When the client is ready for more data, resume the upstream download
+      res.on('drain', () => {
+        if (activeStream && activeStream.isPaused()) {
+          activeStream.resume();
+        }
       });
 
       activeStream.on('end', () => {
         console.log('[proxy-raw-stream] Upstream stream ended cleanly. Reconnecting...');
         cleanupActiveStream();
-        setTimeout(startStreaming, 1000); // Reconnect after 1 second
+        setTimeout(startStreaming, 1000); 
       });
 
       activeStream.on('error', (err) => {
         console.warn('[proxy-raw-stream] Upstream stream error, reconnecting:', err.message);
         cleanupActiveStream();
-        setTimeout(startStreaming, 3000); // Reconnect after 3 seconds
+        setTimeout(startStreaming, 3000); 
       });
 
     } catch (err) {
       console.error('[proxy-raw-error] Upstream fetch error, retrying:', err.message);
       if (clientDisconnected) return;
-      setTimeout(startStreaming, 5000); // Retry after 5 seconds
+      setTimeout(startStreaming, 5000); 
     }
   }
 
