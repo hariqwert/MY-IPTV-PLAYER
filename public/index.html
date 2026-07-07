@@ -535,10 +535,10 @@ async function addSource() {
   const activeTab = document.querySelector('.tab.active').dataset.tab;
   const id = 'src-' + Date.now();
   let channels;
+  const url = activeTab === 'url' ? document.getElementById('url-input').value.trim() : null;
 
   try {
     if (activeTab === 'url') {
-      const url = document.getElementById('url-input').value.trim();
       if (!url) return showModalError('Please enter a URL');
       const res = await fetch('/api/m3u?url=' + encodeURIComponent(url));
       const data = await res.json();
@@ -558,7 +558,7 @@ async function addSource() {
   }
 
   const groups = ['All', ...new Set(channels.map(c => c.group))];
-  state.sources.push({ id, label, type: 'm3u', status: 'connected', channels, groups });
+  state.sources.push({ id, label, type: 'm3u', status: 'connected', url, channels, groups });
   state.activeSourceId = id;
   state.activeGroup = 'All';
   closeModal();
@@ -568,13 +568,73 @@ async function addSource() {
 
 function renderSources() {
   const el = document.getElementById('sources-list');
-  el.innerHTML = state.sources.map(s => `
-    <div class="source-card ${s.id === state.activeSourceId ? 'active' : ''}" onclick="selectSource('${s.id}')" style="position: relative; padding-right: 35px;">
-      <div class="name">${s.label} <span class="dot ${s.status === 'connected' ? 'ok' : 'err'}"></span></div>
-      <div class="meta">${s.type.toUpperCase()} · ${s.status}</div>
-      <button onclick="deleteSource(event, '${s.id}')" style="position: absolute; right: 12px; top: 50%; transform: translateY(-50%); background: none; border: none; color: var(--red); cursor: pointer; font-size: 11px; font-family: 'IBM Plex Mono', monospace; font-weight: bold; padding: 4px;">✕</button>
-    </div>
-  `).join('') || '<div style="color:var(--text-dim);font-size:12px;margin-top:10px;font-family:\'IBM Plex Mono\',monospace;">No sources yet</div>';
+  el.innerHTML = state.sources.map(s => {
+    const canRefresh = (s.id === 'src-default' || s.url);
+    const refreshBtn = canRefresh ? `<button onclick="refreshSource(event, '${s.id}')" title="Refresh source" style="position: absolute; right: 35px; top: 50%; transform: translateY(-50%); background: none; border: none; color: var(--amber); cursor: pointer; font-size: 11px; font-family: 'IBM Plex Mono', monospace; font-weight: bold; padding: 4px;">↻</button>` : '';
+    const pr = canRefresh ? '55px' : '35px';
+    return `
+      <div class="source-card ${s.id === state.activeSourceId ? 'active' : ''}" onclick="selectSource('${s.id}')" style="position: relative; padding-right: ${pr};">
+        <div class="name">${s.label} <span class="dot ${s.status === 'connected' ? 'ok' : 'err'}"></span></div>
+        <div class="meta">${s.type.toUpperCase()} · ${s.status}</div>
+        ${refreshBtn}
+        <button onclick="deleteSource(event, '${s.id}')" title="Delete source" style="position: absolute; right: 12px; top: 50%; transform: translateY(-50%); background: none; border: none; color: var(--red); cursor: pointer; font-size: 11px; font-family: 'IBM Plex Mono', monospace; font-weight: bold; padding: 4px;">✕</button>
+      </div>
+    `;
+  }).join('') || '<div style="color:var(--text-dim);font-size:12px;margin-top:10px;font-family:\'IBM Plex Mono\',monospace;">No sources yet</div>';
+}
+
+async function refreshSource(event, id) {
+  event.stopPropagation();
+  const source = state.sources.find(s => s.id === id);
+  if (!source) return;
+
+  const card = event.target.closest('.source-card');
+  const metaEl = card ? card.querySelector('.meta') : null;
+  const originalMeta = metaEl ? metaEl.textContent : '';
+  if (metaEl) metaEl.textContent = 'REFRESHING…';
+
+  try {
+    let res;
+    if (id === 'src-default') {
+      res = await fetch('/default.m3u');
+      if (res.ok) {
+        const text = await res.text();
+        const uploadRes = await fetch('/api/m3u/upload', {
+          method: 'POST',
+          headers: { 'Content-Type': 'text/plain' },
+          body: text
+        });
+        const data = await uploadRes.json();
+        if (data.error) throw new Error(data.error.message);
+        source.channels = data.channels;
+      } else {
+        throw new Error('Server returned ' + res.status);
+      }
+    } else if (source.url) {
+      res = await fetch('/api/m3u?url=' + encodeURIComponent(source.url));
+      const data = await res.json();
+      if (data.error) throw new Error(data.error.message);
+      source.channels = data.channels;
+    } else {
+      alert('Cannot refresh uploaded files. Please re-upload the file.');
+      if (metaEl) metaEl.textContent = originalMeta;
+      return;
+    }
+
+    source.groups = ['All', ...new Set(source.channels.map(c => c.group))];
+    source.status = 'connected';
+    
+    saveSourcesToDB(state.sources);
+    if (state.activeSourceId === id) {
+      state.activeGroup = 'All';
+      renderGroups();
+      renderChannels();
+    }
+    renderSources();
+  } catch (e) {
+    alert('Failed to refresh: ' + e.message);
+    if (metaEl) metaEl.textContent = originalMeta;
+  }
 }
 
 function deleteSource(event, id) {
