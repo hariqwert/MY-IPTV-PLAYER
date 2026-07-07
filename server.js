@@ -432,21 +432,10 @@ app.get('/api/stream-proxy', async (req, res) => {
       '-i', url
     ];
 
-    if (forceTranscode) {
-      args.push(
-        '-c:v', 'libx264',
-        '-preset', 'ultrafast',
-        '-tune', 'zerolatency',
-        '-crf', '26',
-        '-vf', 'scale=-2:360',
-        '-c:a', 'aac', '-b:a', '128k'
-      );
-    } else {
-      args.push(
-        '-c:v', 'copy',
-        '-c:a', 'aac', '-b:a', '128k'
-      );
-    }
+    args.push(
+      '-c:v', 'copy',
+      '-c:a', 'aac', '-b:a', '128k'
+    );
 
     args.push(
       '-f', 'mp4', '-movflags', 'frag_keyframe+empty_moov',
