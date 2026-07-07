@@ -808,20 +808,25 @@ function playChannel(sourceId, channelId) {
   }
 
   function fallbackToTranscode() {
+    // 1. Clear video element source and load to reset media pipeline and clear error flags first
+    video.removeAttribute('src');
+    try { video.load(); } catch (e) {}
+
+    // 2. Now safely dispose of mpegts.js instance
     if (state.mpegtsPlayer) {
-      state.mpegtsPlayer.unload();
-      state.mpegtsPlayer.detachMediaElement();
-      state.mpegtsPlayer.destroy();
+      try { state.mpegtsPlayer.unload(); } catch (e) {}
+      try { state.mpegtsPlayer.detachMediaElement(); } catch (e) {}
+      try { state.mpegtsPlayer.destroy(); } catch (e) {}
       state.mpegtsPlayer = null;
     }
     if (state._nativeErrorListener) {
       video.removeEventListener('error', state._nativeErrorListener);
       state._nativeErrorListener = null;
     }
+    
+    // 3. Set up the fallback transcoding source
     setStatus('Transcoding (Format Fallback)…');
     qSelect.value = 'transcode';
-    video.removeAttribute('src');
-    try { video.load(); } catch (e) {}
     video.src = proxyUrl + '&transcode=true';
     
     setTimeout(() => {
@@ -899,7 +904,7 @@ function playChannel(sourceId, channelId) {
     document.getElementById('quality-selector-wrap').style.display = 'block';
 
     if (mpegts.getFeatureList().mseLivePlayback) {
-      let rawProxyUrl = '/api/stream-proxy?format=mpegts&transcode=false&url=' + encodeURIComponent(channel.streamUrl);
+      let rawProxyUrl = '/api/stream-proxy-raw?url=' + encodeURIComponent(channel.streamUrl);
       if (channel.referrer) rawProxyUrl += '&referer=' + encodeURIComponent(channel.referrer);
       if (channel.userAgent) rawProxyUrl += '&userAgent=' + encodeURIComponent(channel.userAgent);
 
@@ -1010,7 +1015,7 @@ function changeQuality(val) {
     // direct quality (use mpegts.js if supported)
     setStatus('Loading…');
     if (mpegts.getFeatureList().mseLivePlayback) {
-      let rawProxyUrl = '/api/stream-proxy?format=mpegts&transcode=false&url=' + encodeURIComponent(channel.streamUrl);
+      let rawProxyUrl = '/api/stream-proxy-raw?url=' + encodeURIComponent(channel.streamUrl);
       if (channel.referrer) rawProxyUrl += '&referer=' + encodeURIComponent(channel.referrer);
       if (channel.userAgent) rawProxyUrl += '&userAgent=' + encodeURIComponent(channel.userAgent);
       
