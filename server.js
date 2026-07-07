@@ -330,10 +330,56 @@ app.get('/api/stream-proxy', async (req, res) => {
 
   let currentResponseStream = null;
   let stderrBuf = '';
-  ffmpeg.stderr.on('data', (d) => { stderrBuf += d.toString(); });
+  
+  // Decoupled buffer queue for ffmpeg.stdout to prevent backpressure propagating to upstream
+  const MAX_BUFFER_SIZE_BYTES = 3 * 1024 * 1024; // 3MB
+  let bufferQueue = [];
+  let bufferSizeBytes = 0;
+  let isWriting = false;
+
+  const writeNext = () => {
+    if (isWriting || clientDisconnected) return;
+    if (bufferQueue.length === 0) return;
+
+    isWriting = true;
+    const chunk = bufferQueue.shift();
+    bufferSizeBytes -= chunk.length;
+
+    const ok = res.write(chunk);
+    if (ok) {
+      isWriting = false;
+      setImmediate(writeNext);
+    } else {
+      res.once('drain', () => {
+        isWriting = false;
+        writeNext();
+      });
+    }
+  };
+
+  const addChunk = (chunk) => {
+    bufferQueue.push(chunk);
+    bufferSizeBytes += chunk.length;
+    
+    while (bufferSizeBytes > MAX_BUFFER_SIZE_BYTES && bufferQueue.length > 0) {
+      const removed = bufferQueue.shift();
+      bufferSizeBytes -= removed.length;
+    }
+    
+    writeNext();
+  };
+
+  ffmpeg.stderr.on('data', (d) => {
+    const msg = d.toString();
+    stderrBuf += msg;
+    console.log(`[ffmpeg-stderr] ${msg.trim()}`);
+  });
 
   let gotData = false;
-  ffmpeg.stdout.once('data', () => { gotData = true; });
+  ffmpeg.stdout.on('data', (chunk) => {
+    gotData = true;
+    addChunk(chunk);
+  });
 
   const startupTimer = setTimeout(() => {
     if (!gotData) {
@@ -344,8 +390,6 @@ app.get('/api/stream-proxy', async (req, res) => {
       else res.destroy();
     }
   }, FFMPEG_STARTUP_TIMEOUT_MS);
-
-  ffmpeg.stdout.pipe(res);
 
   const cleanup = () => {
     clearTimeout(startupTimer);
@@ -398,12 +442,20 @@ app.get('/api/stream-proxy', async (req, res) => {
         currentResponseStream = response.data;
         console.log(`[proxy-ffmpeg-connect] Upstream connected. Status: ${response.status}`);
 
-        // Pipe upstream data directly to ffmpeg stdin
-        response.data.pipe(ffmpeg.stdin, { end: false });
+        let chunkCount = 0;
+        response.data.on('data', (chunk) => {
+          chunkCount++;
+          if (chunkCount <= 5) {
+            console.log(`[proxy-ffmpeg-loop] Upstream data chunk ${chunkCount}: ${chunk.length} bytes`);
+          }
+          if (ffmpeg.stdin.writable) {
+            ffmpeg.stdin.write(chunk);
+          }
+        });
 
         await new Promise((resolve) => {
           response.data.on('end', () => {
-            console.log('[proxy-ffmpeg-stream] Upstream ended (natural end).');
+            console.log(`[proxy-ffmpeg-stream] Upstream ended cleanly. Total chunks: ${chunkCount}`);
             resolve();
           });
           response.data.on('error', (err) => {
