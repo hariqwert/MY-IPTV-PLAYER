@@ -402,49 +402,112 @@ app.get('/api/stream-proxy-raw', async (req, res) => {
     return res.status(400).send('Missing url parameter');
   }
 
+  res.setHeader('Content-Type', 'video/mp2t');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+
+  let clientDisconnected = false;
   const abortController = new AbortController();
-  req.on('close', () => abortController.abort());
 
-  try {
-    // Pre-resolve and follow redirects for the stream URL (maintaining domain name)
-    const { url: resolvedUrl } = await followRedirectsAndResolve(streamUrl, referer, userAgentParam);
+  req.on('close', () => {
+    clientDisconnected = true;
+    abortController.abort();
+  });
 
-    const headers = { 'User-Agent': userAgentParam || 'VLC/3.0.18 LibVLC/3.0.18', Accept: '*/*' };
-    if (referer) {
-      headers['Referer'] = referer;
+  let currentResponseStream = null;
+  let bytesReceived = 0;
+  let totalBytesReceived = 0;
+
+  const interval = setInterval(() => {
+    console.log(`[proxy-raw-throughput] Avg speed: ${(bytesReceived / 5 / 1024).toFixed(2)} KB/s. Total bytes: ${totalBytesReceived}`);
+    bytesReceived = 0;
+  }, 5000);
+
+  const cleanup = () => {
+    clearInterval(interval);
+    if (currentResponseStream) {
+      try { currentResponseStream.destroy(); } catch (e) {}
     }
+  };
 
-    console.log('[proxy-raw] Fetching raw stream:', resolvedUrl);
-    
-    const connectTimer = setTimeout(() => abortController.abort(), CONNECT_TIMEOUT_MS);
-    const response = await axios.get(resolvedUrl, {
-      headers,
-      responseType: 'stream',
-      signal: abortController.signal
-    });
-    clearTimeout(connectTimer);
+  req.on('close', cleanup);
 
-    res.setHeader('Content-Type', 'video/mp2t');
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-    res.setHeader('Pragma', 'no-cache');
-    res.setHeader('Expires', '0');
+  let reconnectCount = 0;
+  const maxReconnects = 10000;
 
-    withIdleTimeout(response.data, () => {
-      console.error('[proxy-raw] Stream idle timeout — stalling connection');
-      if (!res.headersSent) res.status(504).send('Gateway Timeout: stream stalled');
-      else res.destroy();
-      response.data.destroy();
-    });
+  while (!clientDisconnected && reconnectCount < maxReconnects) {
+    try {
+      console.log(`[proxy-raw-fetch] Fetching raw stream, attempt: ${reconnectCount + 1}`);
+      const { url: resolvedUrl } = await followRedirectsAndResolve(streamUrl, referer, userAgentParam);
+      
+      const headers = { 'User-Agent': userAgentParam || 'VLC/3.0.18 LibVLC/3.0.18', Accept: '*/*' };
+      if (referer) {
+        headers['Referer'] = referer;
+      }
 
-    response.data.pipe(res);
-  } catch (e) {
-    if (res.headersSent) return res.destroy();
-    if (e.name === 'CanceledError') {
-      return res.status(504).send('Gateway Timeout: connection timed out');
+      const fetchAbort = new AbortController();
+      const connectTimer = setTimeout(() => fetchAbort.abort(), CONNECT_TIMEOUT_MS);
+      
+      const response = await axios.get(resolvedUrl, {
+        headers,
+        responseType: 'stream',
+        signal: fetchAbort.signal
+      });
+      clearTimeout(connectTimer);
+
+      if (clientDisconnected) {
+        response.data.destroy();
+        break;
+      }
+
+      currentResponseStream = response.data;
+      console.log(`[proxy-raw-connect] Upstream connected. Status: ${response.status}`);
+
+      withIdleTimeout(response.data, () => {
+        console.error('[proxy-raw] Stream idle timeout — stalling connection');
+        try { response.data.destroy(); } catch (e) {}
+      });
+
+      // Pipe this stream to client response without ending it
+      response.data.pipe(res, { end: false });
+
+      // Wait for this stream to finish or error
+      await new Promise((resolve) => {
+        response.data.on('data', (chunk) => {
+          bytesReceived += chunk.length;
+          totalBytesReceived += chunk.length;
+        });
+        response.data.on('end', () => {
+          console.log('[proxy-raw-stream] Upstream stream ended (natural end).');
+          resolve();
+        });
+        response.data.on('error', (err) => {
+          console.warn('[proxy-raw-stream] Upstream stream error:', err.message);
+          resolve();
+        });
+        response.data.on('close', () => {
+          resolve();
+        });
+      });
+
+      if (clientDisconnected) break;
+      // Wait a short delay before reconnecting (e.g. 500ms)
+      await new Promise(r => setTimeout(r, 500));
+      reconnectCount++;
+    } catch (err) {
+      console.error('[proxy-raw-error] Reconnect loop error:', err.message);
+      if (clientDisconnected) break;
+      await new Promise(r => setTimeout(r, 2000));
+      reconnectCount++;
     }
-    console.error('Raw stream proxy error:', e.message);
-    res.status(502).send('Proxy error: ' + e.message);
+  }
+
+  console.log('[proxy-raw-finished] Stream loop finished. Ending response.');
+  cleanup();
+  if (!res.writableEnded) {
+    res.end();
   }
 });
 
