@@ -321,16 +321,7 @@ app.get('/api/internal-stream', async (req, res) => {
 
       activeStream.on('data', (chunk) => {
         if (!isClosed) {
-          const writeOk = res.write(chunk);
-          if (!writeOk) {
-            activeStream.pause();
-          }
-        }
-      });
-
-      res.on('drain', () => {
-        if (activeStream && activeStream.isPaused()) {
-          activeStream.resume();
+          res.write(chunk);
         }
       });
 
@@ -368,7 +359,6 @@ app.get('/api/internal-stream', async (req, res) => {
 
 function spawnFfmpeg(url, audioCopy) {
   const args = [
-    '-re',
     '-fflags', '+genpts+igndts+discardcorrupt+nobuffer',
     '-correct_ts_overflow', '1',
     '-avoid_negative_ts', 'make_zero',
