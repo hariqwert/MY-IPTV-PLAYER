@@ -271,6 +271,7 @@ app.get('/api/stream-proxy', async (req, res) => {
   const forceTranscode = req.query.transcode === 'true';
   const referer = req.query.referer || req.query.referrer;
   const userAgentParam = req.query.userAgent || req.query.useragent;
+  const format = req.query.format || 'mp4'; // 'mp4' or 'mpegts'
 
   if (!streamUrl || typeof streamUrl !== 'string') {
     return res.status(400).send('Missing url parameter');
@@ -316,12 +317,12 @@ app.get('/api/stream-proxy', async (req, res) => {
     console.warn('[proxy-dns-bypass] DNS bypass resolution error:', dnsErr.message);
   }
 
-  console.log('[proxy] Starting ffmpeg stream copy/transcode (resolved IP):', ffmpegUrl);
-  const ffmpeg = spawnFfmpeg(ffmpegUrl, forceTranscode, hostHeader);
+  console.log(`[proxy] Starting ffmpeg stream copy/transcode (format: ${format}, resolved IP):`, ffmpegUrl);
+  const ffmpeg = spawnFfmpeg(ffmpegUrl, forceTranscode, hostHeader, format);
 
   if (res.socket) res.socket.setNoDelay(true);
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Content-Type', 'video/mp4');
+  res.setHeader('Content-Type', format === 'mpegts' ? 'video/mp2t' : 'video/mp4');
   res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
   res.setHeader('Pragma', 'no-cache');
   res.setHeader('Expires', '0');
@@ -404,7 +405,7 @@ app.get('/api/stream-proxy', async (req, res) => {
     }
   });
 
-  function spawnFfmpeg(url, forceTranscode, hostHeader) {
+  function spawnFfmpeg(url, forceTranscode, hostHeader, outFormat) {
     const ua = userAgentParam || 'VLC/3.0.18 LibVLC/3.0.18';
     let headersStr = `User-Agent: ${ua}\r\nAccept: */*\r\n`;
     if (referer) {
@@ -415,6 +416,9 @@ app.get('/api/stream-proxy', async (req, res) => {
     }
     
     const args = [
+      '-reconnect', '1',
+      '-reconnect_streamed', '1',
+      '-reconnect_delay_max', '5',
       '-headers', headersStr,
       '-thread_queue_size', '4096',
     ];
@@ -441,14 +445,22 @@ app.get('/api/stream-proxy', async (req, res) => {
     } else {
       args.push(
         '-c:v', 'copy',
-        '-c:a', 'aac', '-b:a', '128k'
+        '-c:a', 'copy'
       );
     }
 
-    args.push(
-      '-f', 'mp4', '-movflags', 'frag_keyframe+empty_moov',
-      'pipe:1'
-    );
+    if (outFormat === 'mpegts') {
+      args.push(
+        '-f', 'mpegts',
+        'pipe:1'
+      );
+    } else {
+      args.push(
+        '-f', 'mp4',
+        '-movflags', 'frag_keyframe+empty_moov',
+        'pipe:1'
+      );
+    }
 
     return spawn(FFMPEG, args);
   }

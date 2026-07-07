@@ -899,7 +899,7 @@ function playChannel(sourceId, channelId) {
     document.getElementById('quality-selector-wrap').style.display = 'block';
 
     if (mpegts.getFeatureList().mseLivePlayback) {
-      let rawProxyUrl = '/api/stream-proxy-raw?url=' + encodeURIComponent(channel.streamUrl);
+      let rawProxyUrl = '/api/stream-proxy?format=mpegts&transcode=false&url=' + encodeURIComponent(channel.streamUrl);
       if (channel.referrer) rawProxyUrl += '&referer=' + encodeURIComponent(channel.referrer);
       if (channel.userAgent) rawProxyUrl += '&userAgent=' + encodeURIComponent(channel.userAgent);
 
@@ -1010,7 +1010,7 @@ function changeQuality(val) {
     // direct quality (use mpegts.js if supported)
     setStatus('Loading…');
     if (mpegts.getFeatureList().mseLivePlayback) {
-      let rawProxyUrl = '/api/stream-proxy-raw?url=' + encodeURIComponent(channel.streamUrl);
+      let rawProxyUrl = '/api/stream-proxy?format=mpegts&transcode=false&url=' + encodeURIComponent(channel.streamUrl);
       if (channel.referrer) rawProxyUrl += '&referer=' + encodeURIComponent(channel.referrer);
       if (channel.userAgent) rawProxyUrl += '&userAgent=' + encodeURIComponent(channel.userAgent);
       
