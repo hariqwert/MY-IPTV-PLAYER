@@ -545,71 +545,75 @@ app.get('/api/stream-proxy-raw', async (req, res) => {
     writeNext();
   };
 
-  try {
-    console.log('[proxy-raw-fetch] Fetching raw stream directly with redirects:', streamUrl);
-    const clientRange = req.headers.range;
-    const headers = {
-      'User-Agent': userAgentParam || 'VLC/3.0.18 LibVLC/3.0.18',
-      'Accept': '*/*',
-      'Accept-Encoding': 'identity',
-      'Range': clientRange || 'bytes=0-',
-      'Connection': 'keep-alive',
-      ...(referer ? { 'Referer': referer } : {})
-    };
+  const clientRange = req.headers.range;
+  const headers = {
+    'User-Agent': userAgentParam || 'VLC/3.0.18 LibVLC/3.0.18',
+    'Accept': '*/*',
+    'Accept-Encoding': 'identity',
+    'Range': clientRange || 'bytes=0-',
+    'Connection': 'keep-alive',
+    ...(referer ? { 'Referer': referer } : {})
+  };
 
-    const connectTimer = setTimeout(() => abortController.abort(), CONNECT_TIMEOUT_MS);
-    const response = await getStreamWithRedirects(streamUrl, headers, abortController.signal);
-    clearTimeout(connectTimer);
+  let activeStream = null;
 
-    if (clientDisconnected) {
-      response.data.destroy();
-      return;
+  const cleanupActiveStream = () => {
+    if (activeStream) {
+      activeStream.removeAllListeners('data');
+      activeStream.removeAllListeners('end');
+      activeStream.removeAllListeners('error');
+      activeStream.removeAllListeners('close');
+      try { activeStream.destroy(); } catch (e) {}
+      activeStream = null;
     }
+  };
 
-    responseStream = response.data;
-    console.log(`[proxy-raw-connect] Upstream connected. Status: ${response.status}`);
+  const originalCleanup = cleanup;
+  cleanup = () => {
+    originalCleanup();
+    cleanupActiveStream();
+  };
 
-    withIdleTimeout(response.data, () => {
-      console.error('[proxy-raw] Stream idle timeout — stalling connection');
-      cleanup();
-      if (!res.headersSent) res.status(504).send('Gateway Timeout: stream stalled');
-      else res.destroy();
-    });
+  async function startStreaming() {
+    if (clientDisconnected) return;
 
-    response.data.on('data', (chunk) => {
-      bytesReceived += chunk.length;
-      totalBytesReceived += chunk.length;
-      addChunk(chunk);
-    });
+    try {
+      console.log('[proxy-raw-fetch] Connecting to upstream:', streamUrl);
+      const response = await getStreamWithRedirects(streamUrl, headers, abortController.signal);
+      if (clientDisconnected) {
+        try { response.data.destroy(); } catch (e) {}
+        return;
+      }
 
-    response.data.on('end', () => {
-      console.log('[proxy-raw-stream] Upstream stream ended cleanly.');
-      cleanup();
-      if (!res.writableEnded) res.end();
-    });
+      activeStream = response.data;
+      console.log(`[proxy-raw-connect] Upstream connected. Status: ${response.status}`);
 
-    response.data.on('error', (err) => {
-      console.warn('[proxy-raw-stream] Upstream stream error:', err.message);
-      cleanup();
-      if (!res.headersSent) res.status(502).send('Upstream stream error');
-      else res.destroy();
-    });
+      activeStream.on('data', (chunk) => {
+        bytesReceived += chunk.length;
+        totalBytesReceived += chunk.length;
+        addChunk(chunk);
+      });
 
-    response.data.on('close', () => {
-      console.log('[proxy-raw-stream] Upstream stream closed.');
-      cleanup();
-      if (!res.writableEnded) res.end();
-    });
+      activeStream.on('end', () => {
+        console.log('[proxy-raw-stream] Upstream stream ended cleanly. Reconnecting...');
+        cleanupActiveStream();
+        setTimeout(startStreaming, 1000); // Reconnect after 1 second
+      });
 
-  } catch (err) {
-    console.error('[proxy-raw-error] Upstream fetch error:', err.message);
-    cleanup();
-    if (!res.headersSent) {
-      res.status(502).send('Fetch error: ' + err.message);
-    } else {
-      res.destroy();
+      activeStream.on('error', (err) => {
+        console.warn('[proxy-raw-stream] Upstream stream error, reconnecting:', err.message);
+        cleanupActiveStream();
+        setTimeout(startStreaming, 3000); // Reconnect after 3 seconds
+      });
+
+    } catch (err) {
+      console.error('[proxy-raw-error] Upstream fetch error, retrying:', err.message);
+      if (clientDisconnected) return;
+      setTimeout(startStreaming, 5000); // Retry after 5 seconds
     }
   }
+
+  startStreaming();
 });
 
 app.listen(PORT, () => console.log(`IPTV player running at http://localhost:${PORT}`));
