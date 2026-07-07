@@ -947,6 +947,12 @@ function playChannel(sourceId, channelId) {
         console.log(`[mpegts-event] ERROR: type=${type}, detail=${detail}, info=`, info);
         if (type === mpegts.ErrorTypes.NETWORK_ERROR) {
           handleMpegtsRestart();
+        } else if (type === mpegts.ErrorTypes.MEDIA_ERROR) {
+          console.warn('mpegts MEDIA_ERROR, falling back to transcoding:', detail);
+          fallbackToTranscode();
+        } else {
+          console.error('mpegts OTHER_ERROR:', detail);
+          fail('Playback error — stream may be offline or blocked');
         }
       });
       player.on(mpegts.Events.STATISTICS_INFO, (stats) => {
@@ -970,21 +976,6 @@ function playChannel(sourceId, channelId) {
       player.attachMediaElement(video);
       player.load();
       player.play().catch(e => console.warn('mpegts play block:', e));
-
-      player.on(mpegts.ErrorTypes.MEDIA_ERROR, (errorDetail) => {
-        console.warn('mpegts MEDIA_ERROR, falling back to transcoding:', errorDetail);
-        fallbackToTranscode();
-      });
-
-      player.on(mpegts.ErrorTypes.NETWORK_ERROR, (errorDetail) => {
-        console.error('mpegts NETWORK_ERROR:', errorDetail);
-        handleMpegtsRestart();
-      });
-
-      player.on(mpegts.ErrorTypes.OTHER_ERROR, (errorDetail) => {
-        console.error('mpegts OTHER_ERROR:', errorDetail);
-        fail('Playback error — stream may be offline or blocked');
-      });
 
       // 25-second loading timeout
       state._loadTimer = setTimeout(() => {
@@ -1074,6 +1065,15 @@ function changeQuality(val) {
         console.log(`[mpegts-event] ERROR: type=${type}, detail=${detail}, info=`, info);
         if (type === mpegts.ErrorTypes.NETWORK_ERROR) {
           playChannel(state.activeSourceId, state.activeChannelId);
+        } else if (type === mpegts.ErrorTypes.MEDIA_ERROR) {
+          console.warn('[mpegts-event] MEDIA_ERROR, falling back to transcoding:', detail);
+          const qSelect = document.getElementById('quality-select');
+          if (qSelect) qSelect.value = 'transcode';
+          changeQuality('transcode');
+        } else {
+          console.error('[mpegts-event] OTHER_ERROR:', detail);
+          setStatus('');
+          showError('Playback error — stream may be offline or blocked');
         }
       });
       player.on(mpegts.Events.STATISTICS_INFO, (stats) => {
@@ -1112,18 +1112,6 @@ function changeQuality(val) {
         }
         console.log(`[video-poll] currentTime=${video.currentTime.toFixed(2)}, readyState=${video.readyState}, bufferedEnd=${bufferedStr}, error=${errorStr}`);
       }, 2000);
-      
-      player.on(mpegts.ErrorTypes.MEDIA_ERROR, (errorDetail) => {
-        console.warn('mpegts MEDIA_ERROR, falling back to transcoding:', errorDetail);
-        const qSelect = document.getElementById('quality-select');
-        if (qSelect) qSelect.value = 'transcode';
-        changeQuality('transcode');
-      });
-
-      player.on(mpegts.ErrorTypes.NETWORK_ERROR, (errorDetail) => {
-        console.error('mpegts NETWORK_ERROR:', errorDetail);
-        playChannel(state.activeSourceId, state.activeChannelId);
-      });
     } else {
       const qSelect = document.getElementById('quality-select');
       if (qSelect) qSelect.value = 'transcode';
