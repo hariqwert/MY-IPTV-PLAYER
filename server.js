@@ -2,6 +2,9 @@
 // M3U parsing (URL + upload) + a CORS/codec/timeout-hardened stream proxy.
 // Run: npm install && node server.js  (http://localhost:8080)
 
+// Disable TLS reject unauthorized globally to prevent Kaspersky SSL interception blocks
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
@@ -11,8 +14,35 @@ const axios = require('axios');
 const dns = require('dns');
 const dnsPromises = require('dns').promises;
 const net = require('net');
+const https = require('https');
 const dnsResolver = new dnsPromises.Resolver();
 dnsResolver.setServers(['8.8.8.8', '1.1.1.1']);
+
+// Resolve host via Google DNS over HTTPS (DoH) over port 443 to bypass UDP blocks and hijacking
+function resolveHostDoh(hostname) {
+  return new Promise((resolve) => {
+    const url = `https://dns.google/resolve?name=${encodeURIComponent(hostname)}&type=A`;
+    https.get(url, { rejectUnauthorized: false, timeout: 3000 }, (res) => {
+      let data = '';
+      res.on('data', (chunk) => data += chunk);
+      res.on('end', () => {
+        try {
+          const json = JSON.parse(data);
+          if (json && json.Answer) {
+            const aRecords = json.Answer.filter(r => r.type === 1);
+            if (aRecords.length > 0) {
+              resolve(aRecords.map(r => r.data));
+              return;
+            }
+          }
+        } catch (e) {}
+        resolve(null);
+      });
+    }).on('error', () => {
+      resolve(null);
+    });
+  });
+}
 
 // Override dns.lookup globally to bypass bad OS DNS servers / timeouts
 const originalLookup = dns.lookup;
@@ -24,7 +54,8 @@ dns.lookup = function(hostname, options, callback) {
     options = {};
   }
 
-  dnsResolver.resolve4(hostname)
+  // Try DoH first (safe from UDP firewalls and local hijacking)
+  resolveHostDoh(hostname)
     .then(ips => {
       if (ips && ips.length > 0) {
         if (options.all) {
@@ -34,10 +65,26 @@ dns.lookup = function(hostname, options, callback) {
           callback(null, ips[0], 4);
         }
       } else {
-        originalLookup(hostname, options, callback);
+        // Fallback 1: Google DNS standard resolver
+        dnsResolver.resolve4(hostname)
+          .then(ips => {
+            if (ips && ips.length > 0) {
+              if (options.all) {
+                const addresses = ips.map(ip => ({ address: ip, family: 4 }));
+                callback(null, addresses);
+              } else {
+                callback(null, ips[0], 4);
+              }
+            } else {
+              originalLookup(hostname, options, callback);
+            }
+          })
+          .catch(() => {
+            originalLookup(hostname, options, callback);
+          });
       }
     })
-    .catch(err => {
+    .catch(() => {
       originalLookup(hostname, options, callback);
     });
 };
