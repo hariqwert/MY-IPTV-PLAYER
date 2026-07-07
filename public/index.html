@@ -1181,6 +1181,10 @@ window.addEventListener('DOMContentLoaded', async () => {
     videoEl.addEventListener('playing', () => {
       hideError();
       setStatus('');
+      if (state._loadTimer) {
+        clearTimeout(state._loadTimer);
+        state._loadTimer = null;
+      }
     });
   }
 
