@@ -313,55 +313,46 @@ app.get('/api/internal-stream', async (req, res) => {
     res.setHeader('Content-Type', 'video/mp2t');
     res.setHeader('Access-Control-Allow-Origin', '*');
     
-    // Rate limiter variables
-    const maxBytesPerSecond = 750 * 1024; // 750 KB/s limit (approx 6 Mbps)
-    let bytesInCurrentSecond = 0;
-    let periodStart = Date.now();
-    let isPausedForBackpressure = false;
-    let isPausedForRateLimit = false;
+    // Decoupled buffer queue for internal-stream to prevent backpressure propagating to upstream
+    const MAX_BUFFER_SIZE_BYTES = 3 * 1024 * 1024; // 3MB
+    let bufferQueue = [];
+    let bufferSizeBytes = 0;
+    let isWriting = false;
 
-    const updatePauseState = () => {
-      const shouldPause = isPausedForBackpressure || isPausedForRateLimit;
-      if (shouldPause) {
-        if (!response.data.isPaused()) response.data.pause();
+    const writeNext = () => {
+      if (isWriting) return;
+      if (bufferQueue.length === 0) return;
+
+      isWriting = true;
+      const chunk = bufferQueue.shift();
+      bufferSizeBytes -= chunk.length;
+
+      const ok = res.write(chunk);
+      if (ok) {
+        isWriting = false;
+        setImmediate(writeNext);
       } else {
-        if (response.data.isPaused()) response.data.resume();
+        res.once('drain', () => {
+          isWriting = false;
+          writeNext();
+        });
       }
     };
 
+    const addChunk = (chunk) => {
+      bufferQueue.push(chunk);
+      bufferSizeBytes += chunk.length;
+      
+      while (bufferSizeBytes > MAX_BUFFER_SIZE_BYTES && bufferQueue.length > 0) {
+        const removed = bufferQueue.shift();
+        bufferSizeBytes -= removed.length;
+      }
+      
+      writeNext();
+    };
+
     response.data.on('data', (chunk) => {
-      const ok = res.write(chunk);
-      if (!ok) {
-        isPausedForBackpressure = true;
-        updatePauseState();
-      }
-
-      bytesInCurrentSecond += chunk.length;
-      const now = Date.now();
-      const elapsed = now - periodStart;
-
-      if (elapsed >= 1000) {
-        periodStart = now;
-        bytesInCurrentSecond = chunk.length;
-      } else if (bytesInCurrentSecond > maxBytesPerSecond) {
-        if (!isPausedForRateLimit) {
-          isPausedForRateLimit = true;
-          updatePauseState();
-
-          const timeToNextPeriod = 1000 - elapsed;
-          setTimeout(() => {
-            isPausedForRateLimit = false;
-            periodStart = Date.now();
-            bytesInCurrentSecond = 0;
-            updatePauseState();
-          }, timeToNextPeriod);
-        }
-      }
-    });
-
-    res.on('drain', () => {
-      isPausedForBackpressure = false;
-      updatePauseState();
+      addChunk(chunk);
     });
 
     response.data.on('end', () => {
@@ -386,6 +377,7 @@ app.get('/api/stream-proxy', async (req, res) => {
   const forceTranscode = req.query.transcode === 'true';
   const referer = req.query.referer || req.query.referrer;
   const userAgentParam = req.query.userAgent || req.query.useragent;
+  const format = req.query.format || 'mp4'; // 'mp4' or 'mpegts'
 
   if (!streamUrl || typeof streamUrl !== 'string') {
     return res.status(400).send('Missing url parameter');
@@ -401,13 +393,13 @@ app.get('/api/stream-proxy', async (req, res) => {
 
   // Target the local loopback internal-stream route to bypass CDN fingerprint blocks
   const internalUrl = `http://localhost:${PORT}/api/internal-stream?url=${encodeURIComponent(streamUrl)}&referer=${encodeURIComponent(referer || '')}&userAgent=${encodeURIComponent(userAgentParam || '')}`;
-  console.log('[proxy] Spawning ffmpeg transcoder for internal loopback URL:', internalUrl);
+  console.log(`[proxy] Spawning ffmpeg transcoder (format: ${format}) for internal loopback URL:`, internalUrl);
   
-  const ffmpeg = spawnFfmpeg(internalUrl, forceTranscode);
+  const ffmpeg = spawnFfmpeg(internalUrl, forceTranscode, format);
 
   if (res.socket) res.socket.setNoDelay(true);
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Content-Type', 'video/mp4');
+  res.setHeader('Content-Type', format === 'mpegts' ? 'video/mp2t' : 'video/mp4');
   res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
   res.setHeader('Pragma', 'no-cache');
   res.setHeader('Expires', '0');
@@ -490,9 +482,8 @@ app.get('/api/stream-proxy', async (req, res) => {
     }
   });
 
-  function spawnFfmpeg(url, forceTranscode) {
+  function spawnFfmpeg(url, forceTranscode, outFormat) {
     const args = [
-      '-re',
       '-fflags', '+genpts+igndts+discardcorrupt+nobuffer',
       '-correct_ts_overflow', '1',
       '-avoid_negative_ts', 'make_zero',
@@ -514,14 +505,22 @@ app.get('/api/stream-proxy', async (req, res) => {
     } else {
       args.push(
         '-c:v', 'copy',
-        '-c:a', 'aac', '-b:a', '128k'
+        '-c:a', 'copy'
       );
     }
 
-    args.push(
-      '-f', 'mp4', '-movflags', 'frag_keyframe+empty_moov',
-      'pipe:1'
-    );
+    if (outFormat === 'mpegts') {
+      args.push(
+        '-f', 'mpegts',
+        'pipe:1'
+      );
+    } else {
+      args.push(
+        '-f', 'mp4',
+        '-movflags', 'frag_keyframe+empty_moov',
+        'pipe:1'
+      );
+    }
 
     return spawn(FFMPEG, args);
   }
