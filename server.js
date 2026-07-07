@@ -442,6 +442,7 @@ app.get('/api/stream-proxy', async (req, res) => {
 
   function spawnFfmpeg(url, forceTranscode) {
     const args = [
+      '-re',
       '-fflags', '+genpts+igndts+discardcorrupt+nobuffer',
       '-correct_ts_overflow', '1',
       '-avoid_negative_ts', 'make_zero',
