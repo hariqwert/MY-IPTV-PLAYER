@@ -10,6 +10,7 @@ const fs = require('fs');
 const axios = require('axios');
 const dns = require('dns');
 const dnsPromises = require('dns').promises;
+const net = require('net');
 const dnsResolver = new dnsPromises.Resolver();
 dnsResolver.setServers(['8.8.8.8', '1.1.1.1']);
 
@@ -288,11 +289,14 @@ app.get('/api/stream-proxy', async (req, res) => {
 
   // Helper: spawn ffmpeg. Supports fast stream copy (default) or full transcoding (fallback).
   // Includes optimized probe & delay flags for instant startup.
-  function spawnFfmpeg(url, forceTranscode) {
+  function spawnFfmpeg(url, forceTranscode, hostHeader) {
     const ua = userAgentParam || 'VLC/3.0.18 LibVLC/3.0.18';
     let headersStr = `User-Agent: ${ua}\r\nAccept: */*\r\n`;
     if (referer) {
       headersStr += `Referer: ${referer}\r\n`;
+    }
+    if (hostHeader) {
+      headersStr += `Host: ${hostHeader}\r\n`;
     }
     
     const args = [
@@ -379,10 +383,33 @@ app.get('/api/stream-proxy', async (req, res) => {
 
   try {
     // --- Direct copy or Transcoding ---
-    console.log('[proxy] Starting ffmpeg stream copy/transcode (resolved):', resolvedUrl);
+    let ffmpegUrl = resolvedUrl;
+    let hostHeader = null;
+
+    try {
+      const parsedUrl = new URL(resolvedUrl);
+      if (!net.isIP(parsedUrl.hostname) && parsedUrl.hostname !== 'localhost') {
+        const ip = await new Promise((resolve) => {
+          dns.lookup(parsedUrl.hostname, (err, address) => {
+            if (err) resolve(null);
+            else resolve(address);
+          });
+        });
+        if (ip) {
+          console.log(`[proxy-dns-bypass] Resolved ffmpeg URL host ${parsedUrl.hostname} -> ${ip}`);
+          hostHeader = parsedUrl.hostname;
+          parsedUrl.hostname = ip;
+          ffmpegUrl = parsedUrl.href;
+        }
+      }
+    } catch (dnsErr) {
+      console.warn('[proxy-dns-bypass] DNS bypass resolution error:', dnsErr.message);
+    }
+
+    console.log('[proxy] Starting ffmpeg stream copy/transcode (resolved):', ffmpegUrl);
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Content-Type', 'video/mp4');
-    pipeFfmpeg(spawnFfmpeg(resolvedUrl, forceTranscode));
+    pipeFfmpeg(spawnFfmpeg(ffmpegUrl, forceTranscode, hostHeader));
   } catch (e) {
     if (res.headersSent) return res.destroy();
     if (e.name === 'CanceledError') {
