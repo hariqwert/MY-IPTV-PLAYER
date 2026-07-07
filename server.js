@@ -414,100 +414,131 @@ app.get('/api/stream-proxy-raw', async (req, res) => {
   req.on('close', () => {
     clientDisconnected = true;
     abortController.abort();
+    cleanup();
   });
 
-  let currentResponseStream = null;
+  let responseStream = null;
   let bytesReceived = 0;
   let totalBytesReceived = 0;
+  
+  const MAX_BUFFER_SIZE_BYTES = 3 * 1024 * 1024; // 3MB
+  let bufferQueue = [];
+  let bufferSizeBytes = 0;
+  let isWriting = false;
 
   const interval = setInterval(() => {
-    console.log(`[proxy-raw-throughput] Avg speed: ${(bytesReceived / 5 / 1024).toFixed(2)} KB/s. Total bytes: ${totalBytesReceived}`);
+    console.log(`[proxy-raw-throughput] Avg speed: ${(bytesReceived / 5 / 1024).toFixed(2)} KB/s. Total bytes: ${totalBytesReceived}. Buffer size: ${(bufferSizeBytes / 1024).toFixed(2)} KB`);
     bytesReceived = 0;
   }, 5000);
 
   const cleanup = () => {
     clearInterval(interval);
-    if (currentResponseStream) {
-      try { currentResponseStream.destroy(); } catch (e) {}
+    if (responseStream) {
+      try { responseStream.destroy(); } catch (e) {}
     }
   };
 
   req.on('close', cleanup);
 
-  let reconnectCount = 0;
-  const maxReconnects = 10000;
+  const writeNext = () => {
+    if (isWriting || clientDisconnected) return;
+    if (bufferQueue.length === 0) return;
 
-  while (!clientDisconnected && reconnectCount < maxReconnects) {
-    try {
-      console.log(`[proxy-raw-fetch] Fetching raw stream, attempt: ${reconnectCount + 1}`);
-      const { url: resolvedUrl } = await followRedirectsAndResolve(streamUrl, referer, userAgentParam);
-      
-      const headers = { 'User-Agent': userAgentParam || 'VLC/3.0.18 LibVLC/3.0.18', Accept: '*/*' };
-      if (referer) {
-        headers['Referer'] = referer;
-      }
+    isWriting = true;
+    const chunk = bufferQueue.shift();
+    bufferSizeBytes -= chunk.length;
 
-      const fetchAbort = new AbortController();
-      const connectTimer = setTimeout(() => fetchAbort.abort(), CONNECT_TIMEOUT_MS);
-      
-      const response = await axios.get(resolvedUrl, {
-        headers,
-        responseType: 'stream',
-        signal: fetchAbort.signal
+    // Write chunk to client
+    const ok = res.write(chunk);
+    if (ok) {
+      isWriting = false;
+      setImmediate(writeNext);
+    } else {
+      res.once('drain', () => {
+        isWriting = false;
+        writeNext();
       });
-      clearTimeout(connectTimer);
-
-      if (clientDisconnected) {
-        response.data.destroy();
-        break;
-      }
-
-      currentResponseStream = response.data;
-      console.log(`[proxy-raw-connect] Upstream connected. Status: ${response.status}`);
-
-      withIdleTimeout(response.data, () => {
-        console.error('[proxy-raw] Stream idle timeout — stalling connection');
-        try { response.data.destroy(); } catch (e) {}
-      });
-
-      // Pipe this stream to client response without ending it
-      response.data.pipe(res, { end: false });
-
-      // Wait for this stream to finish or error
-      await new Promise((resolve) => {
-        response.data.on('data', (chunk) => {
-          bytesReceived += chunk.length;
-          totalBytesReceived += chunk.length;
-        });
-        response.data.on('end', () => {
-          console.log('[proxy-raw-stream] Upstream stream ended (natural end).');
-          resolve();
-        });
-        response.data.on('error', (err) => {
-          console.warn('[proxy-raw-stream] Upstream stream error:', err.message);
-          resolve();
-        });
-        response.data.on('close', () => {
-          resolve();
-        });
-      });
-
-      if (clientDisconnected) break;
-      // Wait a short delay before reconnecting (e.g. 500ms)
-      await new Promise(r => setTimeout(r, 500));
-      reconnectCount++;
-    } catch (err) {
-      console.error('[proxy-raw-error] Reconnect loop error:', err.message);
-      if (clientDisconnected) break;
-      await new Promise(r => setTimeout(r, 2000));
-      reconnectCount++;
     }
-  }
+  };
 
-  console.log('[proxy-raw-finished] Stream loop finished. Ending response.');
-  cleanup();
-  if (!res.writableEnded) {
-    res.end();
+  const addChunk = (chunk) => {
+    bufferQueue.push(chunk);
+    bufferSizeBytes += chunk.length;
+    
+    // Drop oldest chunks if buffer size limit is exceeded
+    while (bufferSizeBytes > MAX_BUFFER_SIZE_BYTES && bufferQueue.length > 0) {
+      const removed = bufferQueue.shift();
+      bufferSizeBytes -= removed.length;
+    }
+    
+    writeNext();
+  };
+
+  try {
+    console.log('[proxy-raw-fetch] Fetching raw stream:', streamUrl);
+    const { url: resolvedUrl } = await followRedirectsAndResolve(streamUrl, referer, userAgentParam);
+    
+    const headers = { 'User-Agent': userAgentParam || 'VLC/3.0.18 LibVLC/3.0.18', Accept: '*/*' };
+    if (referer) {
+      headers['Referer'] = referer;
+    }
+
+    const connectTimer = setTimeout(() => abortController.abort(), CONNECT_TIMEOUT_MS);
+    const response = await axios.get(resolvedUrl, {
+      headers,
+      responseType: 'stream',
+      signal: abortController.signal
+    });
+    clearTimeout(connectTimer);
+
+    if (clientDisconnected) {
+      response.data.destroy();
+      return;
+    }
+
+    responseStream = response.data;
+    console.log(`[proxy-raw-connect] Upstream connected. Status: ${response.status}`);
+
+    withIdleTimeout(response.data, () => {
+      console.error('[proxy-raw] Stream idle timeout — stalling connection');
+      cleanup();
+      if (!res.headersSent) res.status(504).send('Gateway Timeout: stream stalled');
+      else res.destroy();
+    });
+
+    response.data.on('data', (chunk) => {
+      bytesReceived += chunk.length;
+      totalBytesReceived += chunk.length;
+      addChunk(chunk);
+    });
+
+    response.data.on('end', () => {
+      console.log('[proxy-raw-stream] Upstream stream ended cleanly.');
+      cleanup();
+      if (!res.writableEnded) res.end();
+    });
+
+    response.data.on('error', (err) => {
+      console.warn('[proxy-raw-stream] Upstream stream error:', err.message);
+      cleanup();
+      if (!res.headersSent) res.status(502).send('Upstream stream error');
+      else res.destroy();
+    });
+
+    response.data.on('close', () => {
+      console.log('[proxy-raw-stream] Upstream stream closed.');
+      cleanup();
+      if (!res.writableEnded) res.end();
+    });
+
+  } catch (err) {
+    console.error('[proxy-raw-error] Upstream fetch error:', err.message);
+    cleanup();
+    if (!res.headersSent) {
+      res.status(502).send('Fetch error: ' + err.message);
+    } else {
+      res.destroy();
+    }
   }
 });
 

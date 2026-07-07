@@ -679,6 +679,10 @@ function playChannel(sourceId, channelId) {
   const src = state.sources.find(s => s.id === sourceId);
   const channel = src.channels.find(c => c.id === channelId);
   if (!channel) return;
+  
+  if (state.activeChannelId !== channelId) {
+    state._restarts = 0;
+  }
   state.activeChannelId = channelId;
   renderChannels(); hideError();
   document.getElementById('placeholder').style.display = 'none';
@@ -728,6 +732,18 @@ function playChannel(sourceId, channelId) {
     if (state._nativeErrorListener) {
       video.removeEventListener('error', state._nativeErrorListener);
       state._nativeErrorListener = null;
+    }
+  }
+
+  function handleMpegtsRestart() {
+    if (state._restarts === undefined) state._restarts = 0;
+    if (state._restarts < 3) {
+      state._restarts++;
+      console.warn(`[mpegts-restart] Attempting clean player restart ${state._restarts}/3...`);
+      playChannel(state.activeChannelId);
+    } else {
+      console.warn('[mpegts-restart] Max restarts reached, falling back to transcoding.');
+      fallbackToTranscode();
     }
   }
 
@@ -837,6 +853,9 @@ function playChannel(sourceId, channelId) {
       // Add detailed mpegts.js event logging
       player.on(mpegts.Events.ERROR, (type, detail, info) => {
         console.log(`[mpegts-event] ERROR: type=${type}, detail=${detail}, info=`, info);
+        if (type === mpegts.ErrorTypes.NETWORK_ERROR) {
+          handleMpegtsRestart();
+        }
       });
       player.on(mpegts.Events.STATISTICS_INFO, (stats) => {
         console.log(`[mpegts-event] STATISTICS_INFO: decodedFrames=${stats.decodedFrames}, droppedFrames=${stats.droppedFrames}, speed=${stats.speed} KB/s`);
@@ -867,7 +886,7 @@ function playChannel(sourceId, channelId) {
 
       player.on(mpegts.ErrorTypes.NETWORK_ERROR, (errorDetail) => {
         console.error('mpegts NETWORK_ERROR:', errorDetail);
-        fail('Network error — stream may be offline or blocked');
+        handleMpegtsRestart();
       });
 
       player.on(mpegts.ErrorTypes.OTHER_ERROR, (errorDetail) => {
@@ -945,6 +964,9 @@ function changeQuality(val) {
       // Add detailed mpegts.js event logging
       player.on(mpegts.Events.ERROR, (type, detail, info) => {
         console.log(`[mpegts-event] ERROR: type=${type}, detail=${detail}, info=`, info);
+        if (type === mpegts.ErrorTypes.NETWORK_ERROR) {
+          playChannel(state.activeChannelId);
+        }
       });
       player.on(mpegts.Events.STATISTICS_INFO, (stats) => {
         console.log(`[mpegts-event] STATISTICS_INFO: decodedFrames=${stats.decodedFrames}, droppedFrames=${stats.droppedFrames}, speed=${stats.speed} KB/s`);
@@ -988,6 +1010,11 @@ function changeQuality(val) {
         const qSelect = document.getElementById('quality-select');
         if (qSelect) qSelect.value = 'transcode';
         changeQuality('transcode');
+      });
+
+      player.on(mpegts.ErrorTypes.NETWORK_ERROR, (errorDetail) => {
+        console.error('mpegts NETWORK_ERROR:', errorDetail);
+        playChannel(state.activeChannelId);
       });
     } else {
       const qSelect = document.getElementById('quality-select');
