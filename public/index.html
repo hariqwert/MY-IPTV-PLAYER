@@ -7,6 +7,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,600;1,9..144,500&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.5.13/hls.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mpegts.js@latest/dist/mpegts.min.js"></script>
 <style>
   :root {
     --bg: #08080a;
@@ -510,7 +511,7 @@ function backToHero() {
 }
 
 // ---------- App state ----------
-const state = { sources: [], activeSourceId: null, activeGroup: 'All', activeChannelId: null, hls: null, _loadTimer: null };
+const state = { sources: [], activeSourceId: null, activeGroup: 'All', activeChannelId: null, hls: null, mpegtsPlayer: null, _loadTimer: null };
 
 function openModal() { document.getElementById('modal-bg').classList.add('show'); }
 function closeModal() {
@@ -692,7 +693,15 @@ function playChannel(sourceId, channelId) {
 
   const video = document.getElementById('video');
   video.style.display = 'block';
+
+  // Clean up any active players
   if (state.hls) { state.hls.destroy(); state.hls = null; }
+  if (state.mpegtsPlayer) {
+    state.mpegtsPlayer.unload();
+    state.mpegtsPlayer.detachMediaElement();
+    state.mpegtsPlayer.destroy();
+    state.mpegtsPlayer = null;
+  }
   video.src = '';
 
   let proxyUrl = '/api/stream-proxy?url=' + encodeURIComponent(channel.streamUrl);
@@ -704,101 +713,190 @@ function playChannel(sourceId, channelId) {
   }
   setStatus('Loading…');
 
-  // Populate direct vs transcode options for all streams (unified player)
-  qSelect.innerHTML = `
-    <option value="direct">Source (Direct)</option>
-    <option value="transcode">Transcoded (Bypass)</option>
-  `;
-  document.getElementById('quality-selector-wrap').style.display = 'block';
+  const isHls = channel.streamUrl.includes('.m3u8') || channel.streamUrl.includes('.m3u');
 
-  video.src = proxyUrl;
-
-  // Show clear error on video element failure
-  const onVideoError = () => {
-    clearTimeout(state._loadTimer);
-    video.removeEventListener('canplay', onCanPlay);
-    const code = video.error ? video.error.code : 0;
-
-    // If browser throws decode/format error (e.g. interlaced 1080i or HEVC), auto-fallback to lightweight 540p deinterlaced transcode
-    if (code === 3 || code === 4) {
-      setStatus('Transcoding (Format Fallback)…');
-      qSelect.value = 'transcode';
-      video.src = '';
-      video.load();
-      video.src = proxyUrl + '&transcode=true';
-      
-      // Wrap fallback listeners in setTimeout to bypass the synchronous abort error event
-      setTimeout(() => {
-        const onFallbackCanPlay = () => {
-          setStatus('');
-          hideError();
-          video.play().catch(() => fail('Playback error — stream may be offline or blocked'));
-        };
-        video.addEventListener('canplay', onFallbackCanPlay, { once: true });
-        video.addEventListener('error', () => fail('Transcoding failed — stream unreadable'), { once: true });
-      }, 0);
-    } else if (code === 2) {
-      fail('Network error — stream may be offline or blocked');
-    } else if (code === 1) {
-      fail('Playback aborted');
-    } else {
-      fail('Playback error — stream may be offline or blocked');
-    }
-  };
-  video.addEventListener('error', onVideoError, { once: true });
-
-  const onCanPlay = () => {
-    clearTimeout(state._loadTimer);
-    setStatus('');
-    video.removeEventListener('error', onVideoError);
-    video.play().catch(e => {
-      console.warn('Autoplay block or playback issue:', e);
-      fail('Playback blocked. Click inside the player to start.');
-    });
-  };
-  video.addEventListener('canplay', onCanPlay, { once: true });
-
-  // 25-second loading timeout
-  state._loadTimer = setTimeout(() => {
-    video.removeEventListener('canplay', onCanPlay);
-    video.removeEventListener('error', onVideoError);
-    if (!video.readyState || video.readyState < 3) {
-      video.src = '';
-      fail('Stream loading timed out. Click "Retry" to try again.');
-    }
-  }, 25000);
   function fail(msg) { setStatus(''); showError(msg); }
+
+  function fallbackToTranscode() {
+    if (state.mpegtsPlayer) {
+      state.mpegtsPlayer.unload();
+      state.mpegtsPlayer.detachMediaElement();
+      state.mpegtsPlayer.destroy();
+      state.mpegtsPlayer = null;
+    }
+    setStatus('Transcoding (Format Fallback)…');
+    qSelect.value = 'transcode';
+    video.src = '';
+    video.load();
+    video.src = proxyUrl + '&transcode=true';
+    
+    setTimeout(() => {
+      const onFallbackCanPlay = () => {
+        setStatus('');
+        hideError();
+        video.play().catch(() => fail('Playback error — stream may be offline or blocked'));
+      };
+      video.addEventListener('canplay', onFallbackCanPlay, { once: true });
+      video.addEventListener('error', () => fail('Transcoding failed — stream unreadable'), { once: true });
+    }, 0);
+  }
+
+  if (isHls && Hls.isSupported()) {
+    const hls = new Hls({ maxBufferLength: 30 });
+    state.hls = hls;
+    hls.loadSource(proxyUrl);
+    hls.attachMedia(video);
+    hls.on(Hls.Events.MANIFEST_PARSED, () => { 
+      setStatus(''); 
+      video.play().catch(() => {}); 
+      
+      // Populate quality levels
+      const levels = hls.levels;
+      if (levels && levels.length >= 1) {
+        qSelect.innerHTML = '<option value="-1">Auto</option>';
+        levels.forEach((level, index) => {
+          const name = level.name || (level.height ? `${level.height}p` : `Level ${index}`);
+          const opt = document.createElement('option');
+          opt.value = index;
+          opt.textContent = name;
+          qSelect.appendChild(opt);
+        });
+        document.getElementById('quality-selector-wrap').style.display = 'block';
+      }
+    });
+    hls.on(Hls.Events.ERROR, (event, data) => {
+      if (!data.fatal) return;
+      if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+        const code = data.response && data.response.code;
+        if (code === 403) return fail("This channel is blocking automated access");
+        if (code === 504) return fail("This channel's server isn't responding");
+        hls.startLoad();
+      } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+        hls.destroy(); state.hls = null;
+        setStatus('Transcoding…');
+        video.src = proxyUrl + '&transcode=true';
+        video.play().catch(() => fail('Failed to load: no supported source found'));
+      } else {
+        fail('Playback failed: ' + data.type);
+      }
+    });
+  } else if (isHls && video.canPlayType('application/vnd.apple.mpegurl')) {
+    video.src = proxyUrl;
+    video.addEventListener('loadedmetadata', () => { setStatus(''); video.play().catch(() => {}); });
+  } else {
+    // Non-HLS: try mpegts.js first
+    qSelect.innerHTML = `
+      <option value="direct">Source (Direct)</option>
+      <option value="transcode">Transcoded (Bypass)</option>
+    `;
+    document.getElementById('quality-selector-wrap').style.display = 'block';
+
+    if (mpegts.getFeatureList().mseLivePlayback) {
+      let rawProxyUrl = '/api/stream-proxy-raw?url=' + encodeURIComponent(channel.streamUrl);
+      if (channel.referrer) rawProxyUrl += '&referer=' + encodeURIComponent(channel.referrer);
+      if (channel.userAgent) rawProxyUrl += '&userAgent=' + encodeURIComponent(channel.userAgent);
+
+      const player = mpegts.createPlayer({
+        type: 'mpegts',
+        isLive: true,
+        url: rawProxyUrl
+      });
+      state.mpegtsPlayer = player;
+      player.attachMediaElement(video);
+      player.load();
+      player.play().catch(e => console.warn('mpegts play block:', e));
+
+      player.on(mpegts.ErrorTypes.MEDIA_ERROR, (errorDetail) => {
+        console.warn('mpegts MEDIA_ERROR, falling back to transcoding:', errorDetail);
+        fallbackToTranscode();
+      });
+
+      player.on(mpegts.ErrorTypes.NETWORK_ERROR, (errorDetail) => {
+        console.error('mpegts NETWORK_ERROR:', errorDetail);
+        fail('Network error — stream may be offline or blocked');
+      });
+
+      player.on(mpegts.ErrorTypes.OTHER_ERROR, (errorDetail) => {
+        console.error('mpegts OTHER_ERROR:', errorDetail);
+        fail('Playback error — stream may be offline or blocked');
+      });
+
+      // 25-second loading timeout
+      state._loadTimer = setTimeout(() => {
+        if (video.readyState < 3) {
+          fallbackToTranscode();
+        }
+      }, 25000);
+    } else {
+      fallbackToTranscode();
+    }
+  }
 }
 
 function changeQuality(val) {
+  if (state.hls) {
+    state.hls.currentLevel = parseInt(val, 10);
+    return;
+  }
+  
   const src = currentSource();
   const channel = src && src.channels.find(c => c.id === state.activeChannelId);
   if (!channel) return;
-  let proxyUrl = '/api/stream-proxy?url=' + encodeURIComponent(channel.streamUrl);
-  if (channel.referrer) {
-    proxyUrl += '&referer=' + encodeURIComponent(channel.referrer);
-  }
-  if (channel.userAgent) {
-    proxyUrl += '&userAgent=' + encodeURIComponent(channel.userAgent);
-  }
+  
   const video = document.getElementById('video');
   
-  if (state.hls) { state.hls.destroy(); state.hls = null; }
+  // Cleanup any active mpegts player
+  if (state.mpegtsPlayer) {
+    state.mpegtsPlayer.unload();
+    state.mpegtsPlayer.detachMediaElement();
+    state.mpegtsPlayer.destroy();
+    state.mpegtsPlayer = null;
+  }
+  video.src = '';
   
   if (val === 'transcode') {
     setStatus('Transcoding…');
-    video.src = proxyUrl + '&transcode=true';
-  } else {
-    setStatus('Loading…');
+    let proxyUrl = '/api/stream-proxy?url=' + encodeURIComponent(channel.streamUrl) + '&transcode=true';
+    if (channel.referrer) proxyUrl += '&referer=' + encodeURIComponent(channel.referrer);
+    if (channel.userAgent) proxyUrl += '&userAgent=' + encodeURIComponent(channel.userAgent);
+    
     video.src = proxyUrl;
+    const onCanPlay = () => {
+      setStatus('');
+      video.play().catch(e => console.warn("Play failed:", e));
+      video.removeEventListener('canplay', onCanPlay);
+    };
+    video.addEventListener('canplay', onCanPlay);
+  } else {
+    // direct quality (use mpegts.js if supported)
+    setStatus('Loading…');
+    if (mpegts.getFeatureList().mseLivePlayback) {
+      let rawProxyUrl = '/api/stream-proxy-raw?url=' + encodeURIComponent(channel.streamUrl);
+      if (channel.referrer) rawProxyUrl += '&referer=' + encodeURIComponent(channel.referrer);
+      if (channel.userAgent) rawProxyUrl += '&userAgent=' + encodeURIComponent(channel.userAgent);
+      
+      const player = mpegts.createPlayer({
+        type: 'mpegts',
+        isLive: true,
+        url: rawProxyUrl
+      });
+      state.mpegtsPlayer = player;
+      player.attachMediaElement(video);
+      player.load();
+      player.play().catch(e => console.warn('mpegts play block:', e));
+      
+      player.on(mpegts.ErrorTypes.MEDIA_ERROR, (errorDetail) => {
+        console.warn('mpegts MEDIA_ERROR, falling back to transcoding:', errorDetail);
+        const qSelect = document.getElementById('quality-select');
+        if (qSelect) qSelect.value = 'transcode';
+        changeQuality('transcode');
+      });
+    } else {
+      const qSelect = document.getElementById('quality-select');
+      if (qSelect) qSelect.value = 'transcode';
+      changeQuality('transcode');
+    }
   }
-  
-  const onCanPlay = () => {
-    setStatus('');
-    video.play().catch(e => console.warn("Play failed:", e));
-    video.removeEventListener('canplay', onCanPlay);
-  };
-  video.addEventListener('canplay', onCanPlay);
 }
 
 // ---------- IndexedDB Storage Helpers ----------

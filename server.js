@@ -393,4 +393,59 @@ app.get('/api/stream-proxy', async (req, res) => {
   }
 });
 
+app.get('/api/stream-proxy-raw', async (req, res) => {
+  const streamUrl = req.query.url;
+  const referer = req.query.referer || req.query.referrer;
+  const userAgentParam = req.query.userAgent || req.query.useragent;
+
+  if (!streamUrl || typeof streamUrl !== 'string') {
+    return res.status(400).send('Missing url parameter');
+  }
+
+  const abortController = new AbortController();
+  req.on('close', () => abortController.abort());
+
+  try {
+    // Pre-resolve and follow redirects for the stream URL (maintaining domain name)
+    const { url: resolvedUrl } = await followRedirectsAndResolve(streamUrl, referer, userAgentParam);
+
+    const headers = { 'User-Agent': userAgentParam || 'VLC/3.0.18 LibVLC/3.0.18', Accept: '*/*' };
+    if (referer) {
+      headers['Referer'] = referer;
+    }
+
+    console.log('[proxy-raw] Fetching raw stream:', resolvedUrl);
+    
+    const connectTimer = setTimeout(() => abortController.abort(), CONNECT_TIMEOUT_MS);
+    const response = await axios.get(resolvedUrl, {
+      headers,
+      responseType: 'stream',
+      signal: abortController.signal
+    });
+    clearTimeout(connectTimer);
+
+    res.setHeader('Content-Type', 'video/mp2t');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+
+    withIdleTimeout(response.data, () => {
+      console.error('[proxy-raw] Stream idle timeout — stalling connection');
+      if (!res.headersSent) res.status(504).send('Gateway Timeout: stream stalled');
+      else res.destroy();
+      response.data.destroy();
+    });
+
+    response.data.pipe(res);
+  } catch (e) {
+    if (res.headersSent) return res.destroy();
+    if (e.name === 'CanceledError') {
+      return res.status(504).send('Gateway Timeout: connection timed out');
+    }
+    console.error('Raw stream proxy error:', e.message);
+    res.status(502).send('Proxy error: ' + e.message);
+  }
+});
+
 app.listen(PORT, () => console.log(`IPTV player running at http://localhost:${PORT}`));
