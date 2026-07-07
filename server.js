@@ -337,7 +337,7 @@ app.get('/api/stream-proxy', async (req, res) => {
 
   if (res.socket) res.socket.setNoDelay(true);
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Content-Type', 'video/mp4');
+  res.setHeader('Content-Type', 'video/mp2t'); // Output MPEG-TS to client
   res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
   res.setHeader('Pragma', 'no-cache');
   res.setHeader('Expires', '0');
@@ -349,48 +349,11 @@ app.get('/api/stream-proxy', async (req, res) => {
     console.log(`[ffmpeg-stderr] ${msg.trim()}`);
   });
 
-  // Decoupled buffer queue for ffmpeg.stdout to prevent backpressure stalling ffmpeg
-  const MAX_BUFFER_SIZE_BYTES = 3 * 1024 * 1024; // 3MB
-  let bufferQueue = [];
-  let bufferSizeBytes = 0;
-  let isWriting = false;
-
-  const writeNext = () => {
-    if (isWriting || clientDisconnected) return;
-    if (bufferQueue.length === 0) return;
-
-    isWriting = true;
-    const chunk = bufferQueue.shift();
-    bufferSizeBytes -= chunk.length;
-
-    const ok = res.write(chunk);
-    if (ok) {
-      isWriting = false;
-      setImmediate(writeNext);
-    } else {
-      res.once('drain', () => {
-        isWriting = false;
-        writeNext();
-      });
-    }
-  };
-
-  const addChunk = (chunk) => {
-    bufferQueue.push(chunk);
-    bufferSizeBytes += chunk.length;
-    
-    while (bufferSizeBytes > MAX_BUFFER_SIZE_BYTES && bufferQueue.length > 0) {
-      const removed = bufferQueue.shift();
-      bufferSizeBytes -= removed.length;
-    }
-    
-    writeNext();
-  };
-
   let gotData = false;
-  ffmpeg.stdout.on('data', (chunk) => {
+  ffmpeg.stdout.pipe(res);
+
+  ffmpeg.stdout.on('data', () => {
     gotData = true;
-    addChunk(chunk);
   });
 
   const startupTimer = setTimeout(() => {
