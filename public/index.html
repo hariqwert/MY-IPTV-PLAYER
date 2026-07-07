@@ -744,6 +744,7 @@ function playChannel(sourceId, channelId) {
     state._restarts = 0;
   }
   state.activeChannelId = channelId;
+  state.isFallback = false;
   renderChannels(); hideError();
   document.getElementById('placeholder').style.display = 'none';
 
@@ -808,6 +809,12 @@ function playChannel(sourceId, channelId) {
   }
 
   function fallbackToTranscode() {
+    if (state.isFallback) {
+      console.warn('[fallback] Already in fallback mode, ignoring recursive fallback.');
+      return;
+    }
+    state.isFallback = true;
+
     // 1. Clear video element source and load to reset media pipeline and clear error flags first
     video.removeAttribute('src');
     try { video.load(); } catch (e) {}
@@ -824,20 +831,34 @@ function playChannel(sourceId, channelId) {
       state._nativeErrorListener = null;
     }
     
-    // 3. Set up the fallback transcoding source
+    // 3. Set up the fallback transcoding source using mpegts.js for live player compatibility!
     setStatus('Transcoding (Format Fallback)…');
     qSelect.value = 'transcode';
-    video.src = proxyUrl + '&transcode=true';
-    
-    setTimeout(() => {
-      const onFallbackCanPlay = () => {
-        setStatus('');
-        hideError();
-        video.play().catch(() => fail('Playback error — stream may be offline or blocked'));
-      };
-      video.addEventListener('canplay', onFallbackCanPlay, { once: true });
-      video.addEventListener('error', () => fail('Transcoding failed — stream unreadable'), { once: true });
-    }, 0);
+
+    let transcodeUrl = '/api/stream-proxy?url=' + encodeURIComponent(channel.streamUrl) + '&transcode=true';
+    if (channel.referrer) transcodeUrl += '&referer=' + encodeURIComponent(channel.referrer);
+    if (channel.userAgent) transcodeUrl += '&userAgent=' + encodeURIComponent(channel.userAgent);
+
+    console.log('[fallback] Loading transcoded stream via mpegts.js:', transcodeUrl);
+
+    if (mpegts.getFeatureList().mseLivePlayback) {
+      const player = mpegts.createPlayer({
+        type: 'mpegts',
+        isLive: true,
+        url: transcodeUrl
+      });
+      state.mpegtsPlayer = player;
+      player.attachMediaElement(video);
+      player.load();
+      player.play().catch(e => console.warn('[fallback] play block:', e));
+
+      player.on(mpegts.Events.ERROR, (type, detail, info) => {
+        console.error('[fallback-mpegts-event] ERROR:', type, detail);
+        fail('Transcoding failed — stream unreadable');
+      });
+    } else {
+      fail('Transcoding failed — MSE not supported');
+    }
   }
 
   // Setup video element status polling every 2s
@@ -1004,13 +1025,24 @@ function changeQuality(val) {
     if (channel.referrer) proxyUrl += '&referer=' + encodeURIComponent(channel.referrer);
     if (channel.userAgent) proxyUrl += '&userAgent=' + encodeURIComponent(channel.userAgent);
     
-    video.src = proxyUrl;
-    const onCanPlay = () => {
-      setStatus('');
-      video.play().catch(e => console.warn("Play failed:", e));
-      video.removeEventListener('canplay', onCanPlay);
-    };
-    video.addEventListener('canplay', onCanPlay);
+    if (mpegts.getFeatureList().mseLivePlayback) {
+      const player = mpegts.createPlayer({
+        type: 'mpegts',
+        isLive: true,
+        url: proxyUrl
+      });
+      state.mpegtsPlayer = player;
+      player.attachMediaElement(video);
+      player.load();
+      player.play().catch(e => console.warn('[transcode-fallback] play block:', e));
+
+      player.on(mpegts.Events.ERROR, (type, detail, info) => {
+        console.error('[transcode-fallback-mpegts] ERROR:', type, detail);
+        fail('Transcoding failed — stream unreadable');
+      });
+    } else {
+      fail('Transcoding failed — MSE not supported');
+    }
   } else {
     // direct quality (use mpegts.js if supported)
     setStatus('Loading…');
