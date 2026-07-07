@@ -801,7 +801,7 @@ function playChannel(sourceId, channelId) {
     if (state._restarts < 3) {
       state._restarts++;
       console.warn(`[mpegts-restart] Attempting clean player restart ${state._restarts}/3...`);
-      playChannel(state.activeChannelId);
+      playChannel(state.activeSourceId, state.activeChannelId);
     } else {
       console.warn('[mpegts-restart] Max restarts reached, falling back to transcoding.');
       fallbackToTranscode();
@@ -1062,7 +1062,7 @@ function changeQuality(val) {
       player.on(mpegts.Events.ERROR, (type, detail, info) => {
         console.log(`[mpegts-event] ERROR: type=${type}, detail=${detail}, info=`, info);
         if (type === mpegts.ErrorTypes.NETWORK_ERROR) {
-          playChannel(state.activeChannelId);
+          playChannel(state.activeSourceId, state.activeChannelId);
         }
       });
       player.on(mpegts.Events.STATISTICS_INFO, (stats) => {
@@ -1111,7 +1111,7 @@ function changeQuality(val) {
 
       player.on(mpegts.ErrorTypes.NETWORK_ERROR, (errorDetail) => {
         console.error('mpegts NETWORK_ERROR:', errorDetail);
-        playChannel(state.activeChannelId);
+        playChannel(state.activeSourceId, state.activeChannelId);
       });
     } else {
       const qSelect = document.getElementById('quality-select');
