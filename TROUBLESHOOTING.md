@@ -77,9 +77,11 @@ During the web player recovery phase, we analyzed, resolved, and documented the 
 ### Case 1: 17–30s Playback Freeze
 * **Description**: Stream playback cut off cleanly after exactly ~20 seconds of playback on both Original and Transcoded quality modes.
 * **Root-Cause**: 
-  1. The CDN severs the socket connection after sending a ~3MB buffer due to rate-limit triggers (when downloading faster than 1.0x) or TCP window size 0 events (when backpressure pauses consumption).
-  2. For offline channels (like the SD channel Asianet Movies `9031`), the provider server streams a pre-recorded 28-second static file loop and closes the connection cleanly at EOF.
-* **Fix**: Implemented backend-level auto-reconnect relay loops on **both** `/api/internal-stream` and `/api/stream-proxy-raw`. The Express server catches upstream closures, establishes a fresh provider connection in under 1 second, and writes chunks directly to the active client stream. The downstream player continues reading without seeing EOF.
+  1. **Stream Corruption via Chunk Dropping**: Previously, the raw stream proxy endpoint (`/api/stream-proxy-raw`) used a manual memory queue (`bufferQueue`) with a strict `MAX_BUFFER_SIZE_BYTES` size threshold of 3MB. When the buffer filled up (in ~20 seconds), it deleted the oldest chunks to avoid memory growth. However, dropping arbitrary bytes out of an active MPEG-TS stream breaks sequence counters and corrupts packet headers, crashing the browser decoder (`mpegts.js`) and freezing playback.
+  2. **CDN socket cuts / offline loops**: CDNs drop connections on high-speed downloads (scraper blocks) or when TCP windows drop to 0. Additionally, offline streams served a static 28-second file loop before closing.
+* **Fix**: 
+  1. **Native Stream Backpressure**: Replaced the manual chunk-dropping queue logic completely with native Node.js stream backpressure pacing. The proxy writes chunks using `res.write(chunk)`. If `res.write` returns `false` (buffer full), the backend immediately pauses the upstream download (`activeStream.pause()`). When the client browser drains the buffer, we catch the `'drain'` event and resume download (`activeStream.resume()`), keeping the byte sequence 100% intact.
+  2. **Auto-Reconnect Relay Loops**: Appended backend-level auto-reconnect loops to both `/api/internal-stream` and `/api/stream-proxy-raw` to automatically heal socket cuts in under 1 second without closing the downstream player pipe.
 
 ### Case 2: Silent Web Playback
 * **Description**: Video played cleanly but without sound on the web interface.
