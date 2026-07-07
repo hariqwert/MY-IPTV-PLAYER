@@ -284,7 +284,12 @@ app.get('/api/internal-stream', async (req, res) => {
   }
 
   const ua = userAgentParam || 'VLC/3.0.18 LibVLC/3.0.18';
-  const headers = { 'User-Agent': ua, Accept: '*/*', Connection: 'keep-alive' };
+  const headers = {
+    'User-Agent': ua,
+    'Accept': '*/*',
+    'Accept-Encoding': 'identity',
+    'Connection': 'keep-alive'
+  };
   if (referer) headers['Referer'] = referer;
 
   let responseStream = null;
@@ -377,7 +382,6 @@ app.get('/api/stream-proxy', async (req, res) => {
   const forceTranscode = req.query.transcode === 'true';
   const referer = req.query.referer || req.query.referrer;
   const userAgentParam = req.query.userAgent || req.query.useragent;
-  const format = req.query.format || 'mp4'; // 'mp4' or 'mpegts'
 
   if (!streamUrl || typeof streamUrl !== 'string') {
     return res.status(400).send('Missing url parameter');
@@ -393,13 +397,13 @@ app.get('/api/stream-proxy', async (req, res) => {
 
   // Target the local loopback internal-stream route to bypass CDN fingerprint blocks
   const internalUrl = `http://localhost:${PORT}/api/internal-stream?url=${encodeURIComponent(streamUrl)}&referer=${encodeURIComponent(referer || '')}&userAgent=${encodeURIComponent(userAgentParam || '')}`;
-  console.log(`[proxy] Spawning ffmpeg transcoder (format: ${format}) for internal loopback URL:`, internalUrl);
+  console.log('[proxy] Spawning ffmpeg transcoder for internal loopback URL:', internalUrl);
   
-  const ffmpeg = spawnFfmpeg(internalUrl, forceTranscode, format);
+  const ffmpeg = spawnFfmpeg(internalUrl, forceTranscode);
 
   if (res.socket) res.socket.setNoDelay(true);
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Content-Type', format === 'mpegts' ? 'video/mp2t' : 'video/mp4');
+  res.setHeader('Content-Type', 'video/mp4');
   res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
   res.setHeader('Pragma', 'no-cache');
   res.setHeader('Expires', '0');
@@ -482,7 +486,7 @@ app.get('/api/stream-proxy', async (req, res) => {
     }
   });
 
-  function spawnFfmpeg(url, forceTranscode, outFormat) {
+  function spawnFfmpeg(url, forceTranscode) {
     const args = [
       '-fflags', '+genpts+igndts+discardcorrupt+nobuffer',
       '-correct_ts_overflow', '1',
@@ -505,22 +509,14 @@ app.get('/api/stream-proxy', async (req, res) => {
     } else {
       args.push(
         '-c:v', 'copy',
-        '-c:a', 'copy'
+        '-c:a', 'aac', '-b:a', '128k'
       );
     }
 
-    if (outFormat === 'mpegts') {
-      args.push(
-        '-f', 'mpegts',
-        'pipe:1'
-      );
-    } else {
-      args.push(
-        '-f', 'mp4',
-        '-movflags', 'frag_keyframe+empty_moov',
-        'pipe:1'
-      );
-    }
+    args.push(
+      '-f', 'mp4', '-movflags', 'frag_keyframe+empty_moov',
+      'pipe:1'
+    );
 
     return spawn(FFMPEG, args);
   }
@@ -611,7 +607,11 @@ app.get('/api/stream-proxy-raw', async (req, res) => {
     console.log('[proxy-raw-fetch] Fetching raw stream:', streamUrl);
     const { url: resolvedUrl } = await followRedirectsAndResolve(streamUrl, referer, userAgentParam);
     
-    const headers = { 'User-Agent': userAgentParam || 'VLC/3.0.18 LibVLC/3.0.18', Accept: '*/*' };
+    const headers = {
+      'User-Agent': userAgentParam || 'VLC/3.0.18 LibVLC/3.0.18',
+      'Accept': '*/*',
+      'Accept-Encoding': 'identity'
+    };
     if (referer) {
       headers['Referer'] = referer;
     }
