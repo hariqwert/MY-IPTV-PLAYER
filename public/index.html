@@ -800,6 +800,10 @@ function playChannel(sourceId, channelId) {
         type: 'mpegts',
         isLive: true,
         url: rawProxyUrl
+      }, {
+        enableWorker: true,
+        enableStashBuffer: false,
+        liveBufferLatencyChasing: true
       });
       state.mpegtsPlayer = player;
       player.attachMediaElement(video);
@@ -820,6 +824,29 @@ function playChannel(sourceId, channelId) {
         console.error('mpegts OTHER_ERROR:', errorDetail);
         fail('Playback error — stream may be offline or blocked');
       });
+
+      // Watch for stalls or freeze on single frame
+      let lastTime = -1;
+      let checkCount = 0;
+      const stallTimer = setInterval(() => {
+        if (!state.mpegtsPlayer) {
+          clearInterval(stallTimer);
+          return;
+        }
+        if (video.paused) return;
+        const curr = video.currentTime;
+        if (curr > 0 && curr === lastTime) {
+          checkCount++;
+          if (checkCount >= 3) {
+            console.warn('Playback stalled on single frame, falling back to transcoding...');
+            clearInterval(stallTimer);
+            fallbackToTranscode();
+          }
+        } else {
+          lastTime = curr;
+          checkCount = 0;
+        }
+      }, 1000);
 
       // 25-second loading timeout
       state._loadTimer = setTimeout(() => {
@@ -879,6 +906,10 @@ function changeQuality(val) {
         type: 'mpegts',
         isLive: true,
         url: rawProxyUrl
+      }, {
+        enableWorker: true,
+        enableStashBuffer: false,
+        liveBufferLatencyChasing: true
       });
       state.mpegtsPlayer = player;
       player.attachMediaElement(video);
@@ -891,6 +922,31 @@ function changeQuality(val) {
         if (qSelect) qSelect.value = 'transcode';
         changeQuality('transcode');
       });
+
+      // Watch for stalls or freeze on single frame
+      let lastTime = -1;
+      let checkCount = 0;
+      const stallTimer = setInterval(() => {
+        if (!state.mpegtsPlayer) {
+          clearInterval(stallTimer);
+          return;
+        }
+        if (video.paused) return;
+        const curr = video.currentTime;
+        if (curr > 0 && curr === lastTime) {
+          checkCount++;
+          if (checkCount >= 3) {
+            console.warn('Playback stalled on single frame, falling back to transcoding...');
+            clearInterval(stallTimer);
+            const qSelect = document.getElementById('quality-select');
+            if (qSelect) qSelect.value = 'transcode';
+            changeQuality('transcode');
+          }
+        } else {
+          lastTime = curr;
+          checkCount = 0;
+        }
+      }, 1000);
     } else {
       const qSelect = document.getElementById('quality-select');
       if (qSelect) qSelect.value = 'transcode';
