@@ -366,9 +366,40 @@ app.get('/api/internal-stream', async (req, res) => {
   startStreaming();
 });
 
+function spawnFfmpeg(url, audioCopy) {
+  const args = [
+    '-re',
+    '-fflags', '+genpts+igndts+discardcorrupt+nobuffer',
+    '-correct_ts_overflow', '1',
+    '-avoid_negative_ts', 'make_zero',
+    '-flags', '+low_delay+global_header',
+    '-analyzeduration', '1000000',
+    '-probesize', '1000000',
+    '-i', url
+  ];
+
+  if (audioCopy) {
+    args.push(
+      '-c:v', 'copy',
+      '-c:a', 'copy'
+    );
+  } else {
+    args.push(
+      '-c:v', 'copy',
+      '-c:a', 'aac', '-b:a', '128k'
+    );
+  }
+
+  args.push(
+    '-f', 'mpegts',
+    'pipe:1'
+  );
+
+  return spawn(FFMPEG, args);
+}
+
 app.get('/api/stream-proxy', async (req, res) => {
   const streamUrl = req.query.url;
-  const forceTranscode = req.query.transcode === 'true';
   const referer = req.query.referer || req.query.referrer;
   const userAgentParam = req.query.userAgent || req.query.useragent;
 
@@ -388,7 +419,7 @@ app.get('/api/stream-proxy', async (req, res) => {
   const internalUrl = `http://localhost:${PORT}/api/internal-stream?url=${encodeURIComponent(streamUrl)}&referer=${encodeURIComponent(referer || '')}&userAgent=${encodeURIComponent(userAgentParam || '')}`;
   console.log('[proxy] Spawning ffmpeg transcoder for internal loopback URL:', internalUrl);
   
-  const ffmpeg = spawnFfmpeg(internalUrl, forceTranscode);
+  const ffmpeg = spawnFfmpeg(internalUrl, false); // Transcode audio to aac
 
   if (res.socket) res.socket.setNoDelay(true);
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -437,31 +468,6 @@ app.get('/api/stream-proxy', async (req, res) => {
       if (!res.writableEnded) res.end();
     }
   });
-
-  function spawnFfmpeg(url, forceTranscode) {
-    const args = [
-      '-re',
-      '-fflags', '+genpts+igndts+discardcorrupt+nobuffer',
-      '-correct_ts_overflow', '1',
-      '-avoid_negative_ts', 'make_zero',
-      '-flags', '+low_delay+global_header',
-      '-analyzeduration', '1000000',
-      '-probesize', '1000000',
-      '-i', url
-    ];
-
-    args.push(
-      '-c:v', 'copy',
-      '-c:a', 'aac', '-b:a', '128k'
-    );
-
-    args.push(
-      '-f', 'mpegts',
-      'pipe:1'
-    );
-
-    return spawn(FFMPEG, args);
-  }
 });
 
 app.get('/api/stream-proxy-raw', async (req, res) => {
@@ -473,113 +479,67 @@ app.get('/api/stream-proxy-raw', async (req, res) => {
     return res.status(400).send('Missing url parameter');
   }
 
-  res.setHeader('Content-Type', 'video/mp2t');
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-  res.setHeader('Pragma', 'no-cache');
-  res.setHeader('Expires', '0');
-
-  let clientDisconnected = false;
   const abortController = new AbortController();
+  let clientDisconnected = false;
 
   req.on('close', () => {
     clientDisconnected = true;
     abortController.abort();
-    cleanup();
   });
 
-  let responseStream = null;
-  let bytesReceived = 0;
-  let totalBytesReceived = 0;
+  // Target the local loopback internal-stream route to bypass CDN fingerprint blocks
+  const internalUrl = `http://localhost:${PORT}/api/internal-stream?url=${encodeURIComponent(streamUrl)}&referer=${encodeURIComponent(referer || '')}&userAgent=${encodeURIComponent(userAgentParam || '')}`;
+  console.log('[proxy-raw] Spawning ffmpeg copy remuxer for internal loopback URL:', internalUrl);
+  
+  const ffmpeg = spawnFfmpeg(internalUrl, true); // Copy video & audio directly (0% CPU)
 
-  const interval = setInterval(() => {
-    console.log(`[proxy-raw-throughput] Avg speed: ${(bytesReceived / 5 / 1024).toFixed(2)} KB/s. Total bytes: ${totalBytesReceived}.`);
-    bytesReceived = 0;
-  }, 5000);
+  if (res.socket) res.socket.setNoDelay(true);
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Content-Type', 'video/mp2t'); // Output MPEG-TS to client
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
 
-  let activeStream = null;
+  let stderrBuf = '';
+  ffmpeg.stderr.on('data', (d) => {
+    const msg = d.toString();
+    stderrBuf += msg;
+    console.log(`[ffmpeg-raw-stderr] ${msg.trim()}`);
+  });
 
-  const cleanupActiveStream = () => {
-    if (activeStream) {
-      activeStream.removeAllListeners('data');
-      activeStream.removeAllListeners('end');
-      activeStream.removeAllListeners('error');
-      activeStream.removeAllListeners('close');
-      try { activeStream.destroy(); } catch (e) {}
-      activeStream = null;
+  let gotData = false;
+  ffmpeg.stdout.pipe(res);
+
+  ffmpeg.stdout.on('data', () => {
+    gotData = true;
+  });
+
+  const startupTimer = setTimeout(() => {
+    if (!gotData) {
+      console.error('[ffmpeg-raw] startup timeout — no data after 15 seconds');
+      console.error('[ffmpeg-raw] startup stderr log:\n', stderrBuf);
+      cleanup();
+      if (!res.headersSent) res.status(504).send('Stream timeout');
+      else res.destroy();
     }
-  };
+  }, FFMPEG_STARTUP_TIMEOUT_MS);
 
   const cleanup = () => {
-    clearInterval(interval);
-    cleanupActiveStream();
+    clearTimeout(startupTimer);
+    try { ffmpeg.kill('SIGKILL'); } catch (e) {}
   };
 
-  const clientRange = req.headers.range;
-  const headers = {
-    'User-Agent': userAgentParam || 'VLC/3.0.18 LibVLC/3.0.18',
-    'Accept': '*/*',
-    'Accept-Encoding': 'identity',
-    'Range': clientRange || 'bytes=0-',
-    'Connection': 'keep-alive',
-    ...(referer ? { 'Referer': referer } : {})
-  };
+  req.on('close', cleanup);
 
-  async function startStreaming() {
-    if (clientDisconnected) return;
-
-    try {
-      console.log('[proxy-raw-fetch] Connecting to upstream:', streamUrl);
-      const response = await getStreamWithRedirects(streamUrl, headers, abortController.signal);
-      if (clientDisconnected) {
-        try { response.data.destroy(); } catch (e) {}
-        return;
-      }
-
-      activeStream = response.data;
-      console.log(`[proxy-raw-connect] Upstream connected. Status: ${response.status}`);
-
-      // FIXED: Implement proper Node.js stream backpressure instead of dropping chunks
-      activeStream.on('data', (chunk) => {
-        bytesReceived += chunk.length;
-        totalBytesReceived += chunk.length;
-        
-        if (!clientDisconnected) {
-          const writeOk = res.write(chunk);
-          // If the client's network buffer is full, pause the upstream download
-          if (!writeOk) {
-            activeStream.pause();
-          }
-        }
-      });
-
-      // When the client is ready for more data, resume the upstream download
-      res.on('drain', () => {
-        if (activeStream && activeStream.isPaused()) {
-          activeStream.resume();
-        }
-      });
-
-      activeStream.on('end', () => {
-        console.log('[proxy-raw-stream] Upstream stream ended cleanly. Reconnecting...');
-        cleanupActiveStream();
-        setTimeout(startStreaming, 1000); 
-      });
-
-      activeStream.on('error', (err) => {
-        console.warn('[proxy-raw-stream] Upstream stream error, reconnecting:', err.message);
-        cleanupActiveStream();
-        setTimeout(startStreaming, 3000); 
-      });
-
-    } catch (err) {
-      console.error('[proxy-raw-error] Upstream fetch error, retrying:', err.message);
-      if (clientDisconnected) return;
-      setTimeout(startStreaming, 5000); 
+  ffmpeg.on('close', (code) => {
+    console.log(`[proxy-raw-ffmpeg] Process exited with code ${code}`);
+    cleanup();
+    if (!gotData && code !== 0 && !res.headersSent) {
+      res.status(502).send('Streaming failed');
+    } else {
+      if (!res.writableEnded) res.end();
     }
-  }
-
-  startStreaming();
+  });
 });
 
 app.listen(PORT, () => console.log(`IPTV player running at http://localhost:${PORT}`));
