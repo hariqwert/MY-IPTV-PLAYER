@@ -293,50 +293,9 @@ app.get('/api/internal-stream', async (req, res) => {
     res.setHeader('Content-Type', 'video/mp2t');
     res.setHeader('Access-Control-Allow-Origin', '*');
     
-    // Decoupled buffer queue for internal-stream to prevent backpressure propagating to upstream
-    const MAX_BUFFER_SIZE_BYTES = 3 * 1024 * 1024; // 3MB
-    let bufferQueue = [];
-    let bufferSizeBytes = 0;
-    let isWriting = false;
-
-    const writeNext = () => {
-      if (isWriting) return;
-      if (bufferQueue.length === 0) return;
-
-      isWriting = true;
-      const chunk = bufferQueue.shift();
-      bufferSizeBytes -= chunk.length;
-
-      const ok = res.write(chunk);
-      if (ok) {
-        isWriting = false;
-        setImmediate(writeNext);
-      } else {
-        res.once('drain', () => {
-          isWriting = false;
-          writeNext();
-        });
-      }
-    };
-
-    const addChunk = (chunk) => {
-      bufferQueue.push(chunk);
-      bufferSizeBytes += chunk.length;
-      
-      while (bufferSizeBytes > MAX_BUFFER_SIZE_BYTES && bufferQueue.length > 0) {
-        const removed = bufferQueue.shift();
-        bufferSizeBytes -= removed.length;
-      }
-      
-      writeNext();
-    };
-
-    response.data.on('data', (chunk) => {
-      addChunk(chunk);
-    });
+    response.data.pipe(res);
 
     response.data.on('end', () => {
-      if (!res.writableEnded) res.end();
       console.log('[internal-stream] Stream ended cleanly.');
     });
 
@@ -463,6 +422,7 @@ app.get('/api/stream-proxy', async (req, res) => {
 
   function spawnFfmpeg(url, forceTranscode) {
     const args = [
+      '-re',
       '-fflags', '+genpts+igndts+discardcorrupt+nobuffer',
       '-correct_ts_overflow', '1',
       '-avoid_negative_ts', 'make_zero',
