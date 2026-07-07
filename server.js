@@ -77,8 +77,27 @@ if (!FFMPEG) {
 const CONNECT_TIMEOUT_MS = 20000;
 const IDLE_TIMEOUT_MS = 60000;
 
-// Log resolved ffmpeg path on startup
+// Locate VLC binary
+let VLC = process.env.VLC_PATH;
+if (!VLC) {
+  const commonVlcPaths = [
+    'C:\\Program Files\\VideoLAN\\VLC\\vlc.exe',
+    'C:\\Program Files (x86)\\VideoLAN\\VLC\\vlc.exe'
+  ];
+  for (const p of commonVlcPaths) {
+    if (fs.existsSync(p)) {
+      VLC = p;
+      break;
+    }
+  }
+  if (!VLC) {
+    VLC = 'vlc'; // Fallback to PATH
+  }
+}
+
+// Log resolved paths on startup
 console.log('[ffmpeg] resolved path:', FFMPEG);
+console.log('[vlc] resolved path:', VLC);
 
 // Quick reachability probe for a URL (HEAD with short timeout)
 async function probeUrl(url) {
@@ -276,39 +295,75 @@ app.get('/api/internal-stream', async (req, res) => {
     ...(referer ? { 'Referer': referer } : {})
   };
 
-  let responseStream = null;
+  res.setHeader('Content-Type', 'video/mp2t');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+
+  let activeStream = null;
+  let isClosed = false;
 
   req.on('close', () => {
-    if (responseStream) {
-      try { responseStream.destroy(); } catch (e) {}
-    }
+    isClosed = true;
+    cleanupActiveStream();
   });
 
-  try {
-    console.log(`[internal-stream] Connecting directly with redirects: ${streamUrl}`);
-    const response = await getStreamWithRedirects(streamUrl, headers);
+  async function startStreaming() {
+    if (isClosed) return;
 
-    responseStream = response.data;
+    try {
+      console.log(`[internal-stream] Connecting to upstream: ${streamUrl}`);
+      const response = await getStreamWithRedirects(streamUrl, headers);
+      if (isClosed) {
+        try { response.data.destroy(); } catch (e) {}
+        return;
+      }
 
-    res.setHeader('Content-Type', 'video/mp2t');
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    
-    response.data.pipe(res);
+      activeStream = response.data;
 
-    response.data.on('end', () => {
-      console.log('[internal-stream] Stream ended cleanly.');
-    });
+      activeStream.on('data', (chunk) => {
+        if (!isClosed) {
+          const writeOk = res.write(chunk);
+          if (!writeOk) {
+            activeStream.pause();
+          }
+        }
+      });
 
-    response.data.on('error', (err) => {
-      console.warn('[internal-stream] Stream error:', err.message);
-    });
+      res.on('drain', () => {
+        if (activeStream && activeStream.isPaused()) {
+          activeStream.resume();
+        }
+      });
 
-  } catch (err) {
-    console.error('[internal-stream] Fetch error:', err.message);
-    if (!res.headersSent) {
-      res.status(502).send('Fetch error: ' + err.message);
+      activeStream.on('end', () => {
+        console.log('[internal-stream] Upstream ended cleanly. Reconnecting...');
+        cleanupActiveStream();
+        setTimeout(startStreaming, 1000); // Reconnect after 1 second
+      });
+
+      activeStream.on('error', (err) => {
+        console.warn('[internal-stream] Upstream error, reconnecting:', err.message);
+        cleanupActiveStream();
+        setTimeout(startStreaming, 3000); // Reconnect after 3 seconds
+      });
+
+    } catch (err) {
+      console.error('[internal-stream] Upstream connection failure, retrying:', err.message);
+      if (isClosed) return;
+      setTimeout(startStreaming, 5000); // Retry after 5 seconds
     }
   }
+
+  function cleanupActiveStream() {
+    if (activeStream) {
+      activeStream.removeAllListeners('data');
+      activeStream.removeAllListeners('end');
+      activeStream.removeAllListeners('error');
+      try { activeStream.destroy(); } catch (e) {}
+      activeStream = null;
+    }
+  }
+
+  startStreaming();
 });
 
 app.get('/api/stream-proxy', async (req, res) => {
