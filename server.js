@@ -98,52 +98,35 @@ async function probeUrl(url) {
   }
 }
 
-async function followRedirectsAndResolve(urlStr, referer, userAgent) {
+async function getStreamWithRedirects(urlStr, headers, signal) {
   let currentUrl = urlStr;
   let redirectCount = 0;
   const maxRedirects = 5;
-  const headers = { 'User-Agent': userAgent || 'VLC/3.0.18 LibVLC/3.0.18', Accept: '*/*' };
-  if (referer) {
-    headers['Referer'] = referer;
-  }
 
   while (redirectCount < maxRedirects) {
-    try {
-      const response = await axios.head(currentUrl, {
-        headers,
-        maxRedirects: 0,
-        validateStatus: (status) => status >= 200 && status < 400
-      });
+    const response = await axios.get(currentUrl, {
+      headers,
+      maxRedirects: 0,
+      responseType: 'stream',
+      signal,
+      validateStatus: (status) => status >= 200 && status < 400
+    });
 
-      if (response.status >= 300 && response.status < 400) {
-        const location = response.headers['location'];
-        if (location) {
-          currentUrl = location.startsWith('http') ? location : new URL(location, currentUrl).href;
-          redirectCount++;
-          continue;
+    if (response.status >= 300 && response.status < 400) {
+      const location = response.headers['location'];
+      if (location) {
+        currentUrl = location.startsWith('http') ? location : new URL(location, currentUrl).href;
+        redirectCount++;
+        if (response.data) {
+          try { response.data.destroy(); } catch (e) {}
         }
+        continue;
       }
-      break;
-    } catch (e) {
-      if (e.response && e.response.status >= 300 && e.response.status < 400) {
-        const location = e.response.headers['location'];
-        if (location) {
-          currentUrl = location.startsWith('http') ? location : new URL(location, currentUrl).href;
-          redirectCount++;
-          continue;
-        }
-      }
-      console.error('[Redirect Follower] Error:', e.message);
-      break;
     }
-  }
 
-  const parsed = new URL(currentUrl);
-  return {
-    url: currentUrl,
-    originalHost: parsed.hostname,
-    isHttps: parsed.protocol === 'https:'
-  };
+    return response;
+  }
+  throw new Error('Too many redirects');
 }
 
 function err(category, message, retryable) {
@@ -288,9 +271,10 @@ app.get('/api/internal-stream', async (req, res) => {
     'User-Agent': ua,
     'Accept': '*/*',
     'Accept-Encoding': 'identity',
-    'Connection': 'keep-alive'
+    'Range': 'bytes=0-',
+    'Connection': 'keep-alive',
+    ...(referer ? { 'Referer': referer } : {})
   };
-  if (referer) headers['Referer'] = referer;
 
   let responseStream = null;
 
@@ -301,42 +285,8 @@ app.get('/api/internal-stream', async (req, res) => {
   });
 
   try {
-    const { url: resolvedUrl, originalHost } = await followRedirectsAndResolve(streamUrl, referer, userAgentParam);
-    
-    let connectUrl = resolvedUrl;
-    let hostHeader = originalHost;
-
-    try {
-      const parsedUrl = new URL(resolvedUrl);
-      if (!net.isIP(parsedUrl.hostname) && parsedUrl.hostname !== 'localhost') {
-        const ip = await new Promise((resolve) => {
-          dns.lookup(parsedUrl.hostname, (err, address) => {
-            if (err) resolve(null);
-            else resolve(address);
-          });
-        });
-        if (ip) {
-          console.log(`[internal-stream-dns] Resolved host ${parsedUrl.hostname} -> ${ip}`);
-          hostHeader = parsedUrl.hostname;
-          parsedUrl.hostname = ip;
-          connectUrl = parsedUrl.href;
-        }
-      }
-    } catch (dnsErr) {
-      console.warn('[internal-stream-dns] Resolve error:', dnsErr.message);
-    }
-
-    console.log(`[internal-stream] Connecting to resolved IP: ${connectUrl} (Host: ${hostHeader})`);
-    
-    const requestHeaders = {
-      ...headers,
-      'Host': hostHeader
-    };
-
-    const response = await axios.get(connectUrl, {
-      headers: requestHeaders,
-      responseType: 'stream'
-    });
+    console.log(`[internal-stream] Connecting directly with redirects: ${streamUrl}`);
+    const response = await getStreamWithRedirects(streamUrl, headers);
 
     responseStream = response.data;
 
@@ -629,24 +579,19 @@ app.get('/api/stream-proxy-raw', async (req, res) => {
   };
 
   try {
-    console.log('[proxy-raw-fetch] Fetching raw stream:', streamUrl);
-    const { url: resolvedUrl } = await followRedirectsAndResolve(streamUrl, referer, userAgentParam);
-    
+    console.log('[proxy-raw-fetch] Fetching raw stream directly with redirects:', streamUrl);
+    const clientRange = req.headers.range;
     const headers = {
       'User-Agent': userAgentParam || 'VLC/3.0.18 LibVLC/3.0.18',
       'Accept': '*/*',
-      'Accept-Encoding': 'identity'
+      'Accept-Encoding': 'identity',
+      'Range': clientRange || 'bytes=0-',
+      'Connection': 'keep-alive',
+      ...(referer ? { 'Referer': referer } : {})
     };
-    if (referer) {
-      headers['Referer'] = referer;
-    }
 
     const connectTimer = setTimeout(() => abortController.abort(), CONNECT_TIMEOUT_MS);
-    const response = await axios.get(resolvedUrl, {
-      headers,
-      responseType: 'stream',
-      signal: abortController.signal
-    });
+    const response = await getStreamWithRedirects(streamUrl, headers, abortController.signal);
     clearTimeout(connectTimer);
 
     if (clientDisconnected) {
