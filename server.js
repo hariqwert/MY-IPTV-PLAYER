@@ -301,14 +301,39 @@ app.get('/api/internal-stream', async (req, res) => {
   });
 
   try {
-    const { url: resolvedUrl, hostHeader } = await followRedirectsAndResolve(streamUrl, referer, userAgentParam);
-    const requestHeaders = { ...headers };
-    if (hostHeader) {
-      requestHeaders['Host'] = hostHeader;
+    const { url: resolvedUrl, originalHost } = await followRedirectsAndResolve(streamUrl, referer, userAgentParam);
+    
+    let connectUrl = resolvedUrl;
+    let hostHeader = originalHost;
+
+    try {
+      const parsedUrl = new URL(resolvedUrl);
+      if (!net.isIP(parsedUrl.hostname) && parsedUrl.hostname !== 'localhost') {
+        const ip = await new Promise((resolve) => {
+          dns.lookup(parsedUrl.hostname, (err, address) => {
+            if (err) resolve(null);
+            else resolve(address);
+          });
+        });
+        if (ip) {
+          console.log(`[internal-stream-dns] Resolved host ${parsedUrl.hostname} -> ${ip}`);
+          hostHeader = parsedUrl.hostname;
+          parsedUrl.hostname = ip;
+          connectUrl = parsedUrl.href;
+        }
+      }
+    } catch (dnsErr) {
+      console.warn('[internal-stream-dns] Resolve error:', dnsErr.message);
     }
 
-    console.log(`[internal-stream] Connecting to: ${resolvedUrl}`);
-    const response = await axios.get(resolvedUrl, {
+    console.log(`[internal-stream] Connecting to resolved IP: ${connectUrl} (Host: ${hostHeader})`);
+    
+    const requestHeaders = {
+      ...headers,
+      'Host': hostHeader
+    };
+
+    const response = await axios.get(connectUrl, {
       headers: requestHeaders,
       responseType: 'stream'
     });
