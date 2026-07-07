@@ -88,10 +88,12 @@ During the web player recovery phase, we analyzed, resolved, and documented the 
 * **Root-Cause**: Browser Media Source Extensions (MSE) do not support the older `mp2` audio codec natively.
 * **Fix**: Configured FFmpeg to copy the video stream directly (`-c:v copy` at 0% CPU cost) and transcode only the audio track to browser-compatible standard AAC (`-c:a aac -b:a 128k`) on the fly.
 
-### Case 3: Player Crash loop (`Cannot read properties of null (reading 'currentURL')`)
-* **Description**: Browser throws a type error and breaks the player cycle when reconnecting or switching qualities.
-* **Root-Cause**: Calling `.destroy()` on the `mpegtsPlayer` instance directly inside its own error and event listeners deletes dependencies while they are still in the active execution stack of the player engine.
-* **Fix**: Wrapped all `mpegtsPlayer` disposal sequences in `setTimeout(..., 0)` to allow the player stack to complete its execution loop safely before instance destruction.
+### Case 3: Player Crash loop (`Cannot read properties of null (reading 'currentURL')` & `AbortError: The play() request was interrupted by a call to pause()`)
+* **Description**: Browser throws a type error and breaks the player cycle when reconnecting or switching qualities, or fails to play with an AbortError.
+* **Root-Cause**: 
+  1. Calling `.destroy()` on the `mpegtsPlayer` instance directly inside its own error and event listeners deletes dependencies while they are still in the active execution stack of the player engine.
+  2. Deferring the old player's disposal using `setTimeout(..., 0)` but immediately executing the new player's attachment in the same tick causes a race condition. The old player's `detachMediaElement()` cleans up the video element in the *next* tick, detaching the newly attached player and causing an `AbortError`.
+* **Fix**: Wrapped both the old player's destruction and the new player's creation/attachment inside the same `setTimeout(..., 0)` block. This ensures that the old player is fully cleaned up and detached before the new player is initialized and attached to the video element.
 
 ### Case 4: FFmpeg Container Format Mismatch
 * **Description**: Browser player console logged `Non MPEG-TS/FLV, Unsupported media type!`.
