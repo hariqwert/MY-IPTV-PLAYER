@@ -401,7 +401,7 @@ app.get('/api/stream-proxy', async (req, res) => {
     );
 
     args.push(
-      '-f', 'mp4', '-movflags', 'frag_keyframe+empty_moov',
+      '-f', 'mpegts',
       'pipe:1'
     );
 

@@ -1038,10 +1038,12 @@ function changeQuality(val) {
 
       player.on(mpegts.Events.ERROR, (type, detail, info) => {
         console.error('[transcode-fallback-mpegts] ERROR:', type, detail);
-        fail('Transcoding failed — stream unreadable');
+        setStatus('');
+        showError('Transcoding failed — stream unreadable', true);
       });
     } else {
-      fail('Transcoding failed — MSE not supported');
+      setStatus('');
+      showError('Transcoding failed — MSE not supported', false);
     }
   } else {
     // direct quality (use mpegts.js if supported)
