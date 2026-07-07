@@ -274,6 +274,63 @@ function withIdleTimeout(stream, onTimeout) {
   stream.on('close', clear);
 }
 
+app.get('/api/internal-stream', async (req, res) => {
+  const streamUrl = req.query.url;
+  const referer = req.query.referer || req.query.referrer;
+  const userAgentParam = req.query.userAgent || req.query.useragent;
+
+  if (!streamUrl || typeof streamUrl !== 'string') {
+    return res.status(400).send('Missing url parameter');
+  }
+
+  const ua = userAgentParam || 'VLC/3.0.18 LibVLC/3.0.18';
+  const headers = { 'User-Agent': ua, Accept: '*/*', Connection: 'keep-alive' };
+  if (referer) headers['Referer'] = referer;
+
+  let responseStream = null;
+
+  req.on('close', () => {
+    if (responseStream) {
+      try { responseStream.destroy(); } catch (e) {}
+    }
+  });
+
+  try {
+    const { url: resolvedUrl, hostHeader } = await followRedirectsAndResolve(streamUrl, referer, userAgentParam);
+    const requestHeaders = { ...headers };
+    if (hostHeader) {
+      requestHeaders['Host'] = hostHeader;
+    }
+
+    console.log(`[internal-stream] Connecting to: ${resolvedUrl}`);
+    const response = await axios.get(resolvedUrl, {
+      headers: requestHeaders,
+      responseType: 'stream'
+    });
+
+    responseStream = response.data;
+
+    res.setHeader('Content-Type', 'video/mp2t');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    
+    response.data.pipe(res);
+
+    response.data.on('end', () => {
+      console.log('[internal-stream] Stream ended cleanly.');
+    });
+
+    response.data.on('error', (err) => {
+      console.warn('[internal-stream] Stream error:', err.message);
+    });
+
+  } catch (err) {
+    console.error('[internal-stream] Fetch error:', err.message);
+    if (!res.headersSent) {
+      res.status(502).send('Fetch error: ' + err.message);
+    }
+  }
+});
+
 app.get('/api/stream-proxy', async (req, res) => {
   const streamUrl = req.query.url;
   const forceTranscode = req.query.transcode === 'true';
@@ -292,40 +349,11 @@ app.get('/api/stream-proxy', async (req, res) => {
     abortController.abort();
   });
 
-  // Pre-resolve and follow redirects for the stream URL (maintaining domain name)
-  let resolvedUrl;
-  try {
-    const redirectData = await followRedirectsAndResolve(streamUrl, referer, userAgentParam);
-    resolvedUrl = redirectData.url;
-  } catch (e) {
-    return res.status(502).send('Redirect resolve error: ' + e.message);
-  }
-
-  let ffmpegUrl = resolvedUrl;
-  let hostHeader = null;
-
-  try {
-    const parsedUrl = new URL(resolvedUrl);
-    if (!net.isIP(parsedUrl.hostname) && parsedUrl.hostname !== 'localhost') {
-      const ip = await new Promise((resolve) => {
-        dns.lookup(parsedUrl.hostname, (err, address) => {
-          if (err) resolve(null);
-          else resolve(address);
-        });
-      });
-      if (ip) {
-        console.log(`[proxy-dns-bypass] Resolved ffmpeg URL host ${parsedUrl.hostname} -> ${ip}`);
-        hostHeader = parsedUrl.hostname;
-        parsedUrl.hostname = ip;
-        ffmpegUrl = parsedUrl.href;
-      }
-    }
-  } catch (dnsErr) {
-    console.warn('[proxy-dns-bypass] DNS bypass resolution error:', dnsErr.message);
-  }
-
-  console.log('[proxy] Starting ffmpeg stream copy/transcode (resolved IP):', ffmpegUrl);
-  const ffmpeg = spawnFfmpeg(ffmpegUrl, forceTranscode, hostHeader);
+  // Target the local loopback internal-stream route to bypass CDN fingerprint blocks
+  const internalUrl = `http://localhost:${PORT}/api/internal-stream?url=${encodeURIComponent(streamUrl)}&referer=${encodeURIComponent(referer || '')}&userAgent=${encodeURIComponent(userAgentParam || '')}`;
+  console.log('[proxy] Spawning ffmpeg transcoder for internal loopback URL:', internalUrl);
+  
+  const ffmpeg = spawnFfmpeg(internalUrl, forceTranscode);
 
   if (res.socket) res.socket.setNoDelay(true);
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -412,26 +440,8 @@ app.get('/api/stream-proxy', async (req, res) => {
     }
   });
 
-  function spawnFfmpeg(url, forceTranscode, hostHeader) {
-    const ua = userAgentParam || 'VLC/3.0.18 LibVLC/3.0.18';
-    let headersStr = `User-Agent: ${ua}\r\nAccept: */*\r\n`;
-    if (referer) {
-      headersStr += `Referer: ${referer}\r\n`;
-    }
-    if (hostHeader) {
-      headersStr += `Host: ${hostHeader}\r\n`;
-    }
-    
+  function spawnFfmpeg(url, forceTranscode) {
     const args = [
-      '-reconnect', '1',
-      '-reconnect_streamed', '1',
-      '-reconnect_delay_max', '5',
-      '-headers', headersStr,
-      '-thread_queue_size', '4096',
-    ];
-
-    args.push(
-      '-re',
       '-fflags', '+genpts+igndts+discardcorrupt+nobuffer',
       '-correct_ts_overflow', '1',
       '-avoid_negative_ts', 'make_zero',
@@ -439,7 +449,7 @@ app.get('/api/stream-proxy', async (req, res) => {
       '-analyzeduration', '1000000',
       '-probesize', '1000000',
       '-i', url
-    );
+    ];
 
     if (forceTranscode) {
       args.push(
