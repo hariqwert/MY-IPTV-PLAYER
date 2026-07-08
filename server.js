@@ -323,21 +323,25 @@ app.get('/api/internal-stream', async (req, res) => {
       });
 
       activeStream.on('end', () => {
-        console.log('[internal-stream] Upstream ended cleanly. Reconnecting...');
+        console.log('[internal-stream] Upstream ended cleanly. Closing loopback response.');
         cleanupActiveStream();
-        setTimeout(startStreaming, 1000); // Reconnect after 1 second
+        res.end();
       });
 
       activeStream.on('error', (err) => {
-        console.warn('[internal-stream] Upstream error, reconnecting:', err.message);
+        console.warn('[internal-stream] Upstream error, closing loopback response:', err.message);
         cleanupActiveStream();
-        setTimeout(startStreaming, 3000); // Reconnect after 3 seconds
+        if (!res.headersSent) {
+          res.destroy();
+        }
       });
 
     } catch (err) {
-      console.error('[internal-stream] Upstream connection failure, retrying:', err.message);
-      if (isClosed) return;
-      setTimeout(startStreaming, 5000); // Retry after 5 seconds
+      console.error('[internal-stream] Upstream connection failure:', err.message);
+      cleanupActiveStream();
+      if (!isClosed && !res.headersSent) {
+        res.status(502).send('Upstream connection failure: ' + err.message);
+      }
     }
   }
 
@@ -412,6 +416,7 @@ function spawnFfmpeg(url, audioCopy, headersStr) {
   }
 
   args.push(
+    '-re',
     '-fflags', '+genpts+igndts+discardcorrupt',
     '-correct_ts_overflow', '1',
     '-avoid_negative_ts', 'make_zero',
