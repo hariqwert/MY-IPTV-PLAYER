@@ -304,10 +304,19 @@ app.get('/api/internal-stream', async (req, res) => {
   let dropping = false;
   let isMpegTs = null; // null = checking, true = yes, false = no
   let bytesChecked = 0;
+  let lastConnectTime = 0;
 
   function filterMpegTsChunks(chunk) {
     mpegTsBuffer = Buffer.concat([mpegTsBuffer, chunk]);
     const packets = [];
+    const now = Date.now();
+    const timeSinceConnect = now - lastConnectTime;
+    
+    // Safety: Force disable dropping after 4 seconds of connection to prevent permanent lockups
+    if (dropping && timeSinceConnect > 4000) {
+      console.log('[pcr-filter] Reconnect burst window expired. Forcing resume.');
+      dropping = false;
+    }
     
     while (mpegTsBuffer.length >= 188) {
       if (mpegTsBuffer[0] !== 0x47) {
@@ -349,20 +358,23 @@ app.get('/api/internal-stream', async (req, res) => {
           maxPcrBase = pcrBase;
           dropping = false;
         } else {
-          if (pcrBase < maxPcrBase) {
-            const gap = maxPcrBase - pcrBase;
-            if (gap > 45000) { // >0.5 seconds backward time jump
-              if (!dropping) {
+          if (dropping && timeSinceConnect <= 4000) {
+            if (pcrBase >= maxPcrBase) {
+              console.log(`[pcr-filter] Reconnect burst caught up: PCR Base advanced to ${pcrBase} (max: ${maxPcrBase}). Resuming packet write.`);
+              dropping = false;
+              maxPcrBase = pcrBase;
+            }
+          } else {
+            if (pcrBase < maxPcrBase) {
+              const gap = maxPcrBase - pcrBase;
+              // Only drop if it is a major backward jump (>0.5s) within the first 4s window
+              if (gap > 45000 && timeSinceConnect <= 4000) {
                 console.log(`[pcr-filter] Loop detected: PCR Base went back from ${maxPcrBase} to ${pcrBase} (gap: ${gap} ticks). Dropping duplicate packets.`);
                 dropping = true;
               }
+            } else {
+              maxPcrBase = pcrBase;
             }
-          } else {
-            if (dropping) {
-              console.log(`[pcr-filter] Loop ended: PCR Base advanced to ${pcrBase} (max: ${maxPcrBase}). Resuming packet write.`);
-              dropping = false;
-            }
-            maxPcrBase = pcrBase;
           }
         }
       }
@@ -392,6 +404,12 @@ app.get('/api/internal-stream', async (req, res) => {
       }
 
       activeStream = response.data;
+      lastConnectTime = Date.now();
+      
+      // If we had a previous maxPcrBase, start in dropping mode to drop the cached burst
+      if (maxPcrBase !== -1) {
+        dropping = true;
+      }
 
       activeStream.on('data', (chunk) => {
         if (!isClosed) {
@@ -423,21 +441,21 @@ app.get('/api/internal-stream', async (req, res) => {
       });
 
       activeStream.on('end', () => {
-        console.log('[internal-stream] Upstream ended cleanly. Reconnecting...');
+        console.log('[internal-stream] Upstream ended cleanly. Reconnecting in 1000ms...');
         cleanupActiveStream();
-        setTimeout(startStreaming, 50); // Reconnect in 50ms
+        setTimeout(startStreaming, 1000); // Back off to 1000ms
       });
 
       activeStream.on('error', (err) => {
-        console.warn('[internal-stream] Upstream error, reconnecting:', err.message);
+        console.warn('[internal-stream] Upstream error, reconnecting in 1500ms:', err.message);
         cleanupActiveStream();
-        setTimeout(startStreaming, 500); // Reconnect in 500ms
+        setTimeout(startStreaming, 1500); // Back off to 1500ms
       });
 
     } catch (err) {
       console.error('[internal-stream] Upstream connection failure, retrying:', err.message);
       if (isClosed) return;
-      setTimeout(startStreaming, 1000); // Retry in 1000ms
+      setTimeout(startStreaming, 1500); // Retry in 1500ms
     }
   }
 
