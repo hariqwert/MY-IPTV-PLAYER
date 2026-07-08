@@ -389,6 +389,10 @@ app.get('/api/stream/start', async (req, res) => {
     }
 
     args.push(
+      '-reconnect', '1',
+      '-reconnect_at_eof', '1',
+      '-reconnect_streamed', '1',
+      '-reconnect_delay_max', '2',
       '-fflags', '+genpts+igndts+discardcorrupt',
       '-correct_ts_overflow', '1',
       '-avoid_negative_ts', 'make_zero',
