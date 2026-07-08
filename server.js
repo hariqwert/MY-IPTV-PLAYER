@@ -529,9 +529,19 @@ function spawnFfmpeg(url, audioCopy, headersStr) {
     '-avoid_negative_ts', 'make_zero',
     '-flags', '+global_header',
     '-analyzeduration', '1000000',
-    '-probesize', '1000000',
-    '-i', url
+    '-probesize', '1000000'
   );
+
+  if (url.toLowerCase().startsWith('http')) {
+    args.push(
+      '-reconnect', '1',
+      '-reconnect_at_eof', '1',
+      '-reconnect_streamed', '1',
+      '-reconnect_delay_max', '2'
+    );
+  }
+
+  args.push('-i', url);
 
   if (audioCopy) {
     args.push(
@@ -584,22 +594,16 @@ app.get('/api/stream-proxy', async (req, res) => {
 
   const isHls = streamUrl.toLowerCase().includes('.m3u8') || streamUrl.toLowerCase().includes('.m3u') || streamUrl.toLowerCase().includes('/hls/');
 
-  let inputUrl;
-  let headersStr = null;
+  const inputUrl = streamUrl;
+  let headersStr = '';
+  if (referer) headersStr += `Referer: ${referer}\r\n`;
+  if (userAgentParam) headersStr += `User-Agent: ${userAgentParam}\r\n`;
+  else headersStr += `User-Agent: VLC/3.0.18 LibVLC/3.0.18\r\n`;
 
-  if (isHls) {
-    inputUrl = streamUrl;
-    headersStr = '';
-    if (referer) headersStr += `Referer: ${referer}\r\n`;
-    if (userAgentParam) headersStr += `User-Agent: ${userAgentParam}\r\n`;
-    else headersStr += `User-Agent: VLC/3.0.18 LibVLC/3.0.18\r\n`;
-    console.log('[proxy] Spawning ffmpeg transcoder with direct HLS URL:', inputUrl);
-  } else {
-    inputUrl = `http://localhost:${PORT}/api/internal-stream?url=${encodeURIComponent(streamUrl)}&referer=${encodeURIComponent(referer || '')}&userAgent=${encodeURIComponent(userAgentParam || '')}`;
-    console.log('[proxy] Spawning ffmpeg transcoder with loopback URL:', inputUrl);
-  }
+  const transcode = req.query.transcode === 'true';
+  console.log(`[proxy] Spawning ffmpeg (transcode=${transcode}) directly to upstream URL:`, inputUrl);
 
-  const ffmpeg = spawnFfmpeg(inputUrl, false, headersStr);
+  const ffmpeg = spawnFfmpeg(inputUrl, !transcode, headersStr);
 
   if (res.socket) res.socket.setNoDelay(true);
   res.setHeader('Access-Control-Allow-Origin', '*');

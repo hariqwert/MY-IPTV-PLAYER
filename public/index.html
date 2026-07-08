@@ -932,7 +932,7 @@ function changeQuality(val) {
     // direct quality — zero-FFmpeg passthrough
     setStatus('Loading…');
     if (mpegts.getFeatureList().mseLivePlayback) {
-      let rawProxyUrl = window.location.origin + '/api/internal-stream?url=' + encodeURIComponent(channel.streamUrl);
+      let rawProxyUrl = window.location.origin + '/api/stream-proxy?url=' + encodeURIComponent(channel.streamUrl) + '&transcode=false';
       if (channel.referrer) rawProxyUrl += '&referer=' + encodeURIComponent(channel.referrer);
       if (channel.userAgent) rawProxyUrl += '&userAgent=' + encodeURIComponent(channel.userAgent);
       
