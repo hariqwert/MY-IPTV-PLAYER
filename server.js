@@ -289,9 +289,6 @@ app.get('/api/internal-stream', async (req, res) => {
   const headers = {
     'User-Agent': ua,
     'Accept': '*/*',
-    'Accept-Encoding': 'identity',
-    'Range': 'bytes=0-',
-    'Connection': 'keep-alive',
     ...(referer ? { 'Referer': referer } : {})
   };
 
