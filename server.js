@@ -289,7 +289,6 @@ app.get('/api/internal-stream', async (req, res) => {
   const headers = {
     'User-Agent': ua,
     'Accept': '*/*',
-    'Connection': 'keep-alive',
     ...(referer ? { 'Referer': referer } : {})
   };
 
@@ -324,25 +323,21 @@ app.get('/api/internal-stream', async (req, res) => {
       });
 
       activeStream.on('end', () => {
-        console.log('[internal-stream] Upstream ended cleanly. Closing loopback response.');
+        console.log('[internal-stream] Upstream ended cleanly. Reconnecting...');
         cleanupActiveStream();
-        res.end();
+        setTimeout(startStreaming, 1000); // Reconnect after 1 second
       });
 
       activeStream.on('error', (err) => {
-        console.warn('[internal-stream] Upstream error, closing loopback response:', err.message);
+        console.warn('[internal-stream] Upstream error, reconnecting:', err.message);
         cleanupActiveStream();
-        if (!res.headersSent) {
-          res.destroy();
-        }
+        setTimeout(startStreaming, 3000); // Reconnect after 3 seconds
       });
 
     } catch (err) {
-      console.error('[internal-stream] Upstream connection failure:', err.message);
-      cleanupActiveStream();
-      if (!isClosed && !res.headersSent) {
-        res.status(502).send('Upstream connection failure: ' + err.message);
-      }
+      console.error('[internal-stream] Upstream connection failure, retrying:', err.message);
+      if (isClosed) return;
+      setTimeout(startStreaming, 5000); // Retry after 5 seconds
     }
   }
 
@@ -437,9 +432,7 @@ function spawnFfmpeg(url, audioCopy, headersStr) {
       '-preset', 'ultrafast',
       '-tune', 'zerolatency',
       '-crf', '28',
-      '-r', '25',
       '-vf', 'scale=-2:720,format=yuv420p',
-      '-vsync', 'cfr',
       '-c:a', 'aac',
       '-b:a', '128k',
       '-af', 'aresample=async=1'
@@ -477,14 +470,13 @@ app.get('/api/stream-proxy', async (req, res) => {
     ...(referer ? { 'Referer': referer } : {})
   };
 
-  const resolvedUrl = await resolveRedirects(streamUrl, headers);
-  const isHls = resolvedUrl.toLowerCase().includes('.m3u8') || resolvedUrl.toLowerCase().includes('.m3u') || resolvedUrl.toLowerCase().includes('/hls/');
+  const isHls = streamUrl.toLowerCase().includes('.m3u8') || streamUrl.toLowerCase().includes('.m3u') || streamUrl.toLowerCase().includes('/hls/');
 
   let inputUrl;
   let headersStr = null;
 
   if (isHls) {
-    inputUrl = resolvedUrl;
+    inputUrl = streamUrl;
     headersStr = '';
     if (referer) headersStr += `Referer: ${referer}\r\n`;
     if (userAgentParam) headersStr += `User-Agent: ${userAgentParam}\r\n`;
@@ -569,14 +561,13 @@ app.get('/api/stream-proxy-raw', async (req, res) => {
     ...(referer ? { 'Referer': referer } : {})
   };
 
-  const resolvedUrl = await resolveRedirects(streamUrl, headers);
-  const isHls = resolvedUrl.toLowerCase().includes('.m3u8') || resolvedUrl.toLowerCase().includes('.m3u') || resolvedUrl.toLowerCase().includes('/hls/');
+  const isHls = streamUrl.toLowerCase().includes('.m3u8') || streamUrl.toLowerCase().includes('.m3u') || streamUrl.toLowerCase().includes('/hls/');
 
   let inputUrl;
   let headersStr = null;
 
   if (isHls) {
-    inputUrl = resolvedUrl;
+    inputUrl = streamUrl;
     headersStr = '';
     if (referer) headersStr += `Referer: ${referer}\r\n`;
     if (userAgentParam) headersStr += `User-Agent: ${userAgentParam}\r\n`;

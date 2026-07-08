@@ -800,8 +800,6 @@ function playChannel(sourceId, channelId) {
   }
 
   // Setup video element status polling every 2s
-  let lastTime = -1;
-  let stuckCount = 0;
   state._pollTimer = setInterval(() => {
     let bufferedStr = 'none';
     if (video.buffered && video.buffered.length > 0) {
@@ -812,23 +810,6 @@ function playChannel(sourceId, channelId) {
       errorStr = `code=${video.error.code}, message=${video.error.message}`;
     }
     console.log(`[video-poll] currentTime=${video.currentTime.toFixed(2)}, readyState=${video.readyState}, bufferedEnd=${bufferedStr}, error=${errorStr}`);
-
-    // Stall detection
-    if (!video.paused && video.readyState >= 2) {
-      if (video.currentTime === lastTime) {
-        stuckCount++;
-        if (stuckCount >= 3) { // Stuck for 6 seconds (3 polls * 2s)
-          console.warn('[video-poll] Playhead stuck detected, restarting stream...');
-          stuckCount = 0;
-          handleMpegtsRestart();
-        }
-      } else {
-        stuckCount = 0;
-      }
-      lastTime = video.currentTime;
-    } else {
-      stuckCount = 0;
-    }
   }, 2000);
 
   // Set up quality selector (unified direct & transcode)
@@ -990,8 +971,6 @@ function changeQuality(val) {
         player.play().catch(e => console.warn('mpegts play block:', e));
 
         // Setup video status polling for manually triggered quality change too
-        let lastTime = -1;
-        let stuckCount = 0;
         state._pollTimer = setInterval(() => {
           let bufferedStr = 'none';
           if (video.buffered && video.buffered.length > 0) {
@@ -1002,23 +981,6 @@ function changeQuality(val) {
             errorStr = `code=${video.error.code}, message=${video.error.message}`;
           }
           console.log(`[video-poll] currentTime=${video.currentTime.toFixed(2)}, readyState=${video.readyState}, bufferedEnd=${bufferedStr}, error=${errorStr}`);
-
-          // Stall detection
-          if (!video.paused && video.readyState >= 2) {
-            if (video.currentTime === lastTime) {
-              stuckCount++;
-              if (stuckCount >= 3) { // Stuck for 6 seconds
-                console.warn('[video-poll] Playhead stuck detected inside quality change, restarting...');
-                stuckCount = 0;
-                playChannel(state.activeSourceId, state.activeChannelId);
-              }
-            } else {
-              stuckCount = 0;
-            }
-            lastTime = video.currentTime;
-          } else {
-            stuckCount = 0;
-          }
         }, 2000);
       } else {
         const qSelect = document.getElementById('quality-select');
@@ -1126,7 +1088,6 @@ window.addEventListener('DOMContentLoaded', async () => {
     videoEl.addEventListener('playing', () => {
       hideError();
       setStatus('');
-      state._restarts = 0; // Reset restarts count when it successfully plays!
       if (state._loadTimer) {
         clearTimeout(state._loadTimer);
         state._loadTimer = null;
