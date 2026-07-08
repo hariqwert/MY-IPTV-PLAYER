@@ -298,6 +298,83 @@ app.get('/api/internal-stream', async (req, res) => {
   let activeStream = null;
   let isClosed = false;
 
+  // Real-time MPEG-TS PCR filter state to drop duplicate reconnect bursts in Direct Play
+  let mpegTsBuffer = Buffer.alloc(0);
+  let maxPcrBase = -1;
+  let dropping = false;
+  let isMpegTs = null; // null = checking, true = yes, false = no
+  let bytesChecked = 0;
+
+  function filterMpegTsChunks(chunk) {
+    mpegTsBuffer = Buffer.concat([mpegTsBuffer, chunk]);
+    const packets = [];
+    
+    while (mpegTsBuffer.length >= 188) {
+      if (mpegTsBuffer[0] !== 0x47) {
+        let syncIndex = mpegTsBuffer.indexOf(0x47);
+        if (syncIndex === -1) {
+          mpegTsBuffer = Buffer.alloc(0);
+          break;
+        }
+        mpegTsBuffer = mpegTsBuffer.slice(syncIndex);
+        if (mpegTsBuffer.length < 188) break;
+      }
+      
+      const packet = mpegTsBuffer.slice(0, 188);
+      mpegTsBuffer = mpegTsBuffer.slice(188);
+      
+      const adaptationFieldControl = (packet[3] & 0x30) >> 4;
+      let hasPcr = false;
+      let pcrBase = -1;
+      
+      if (adaptationFieldControl === 2 || adaptationFieldControl === 3) {
+        const adaptationFieldLength = packet[4];
+        if (adaptationFieldLength > 0) {
+          const flags = packet[5];
+          const pcrFlag = (flags & 0x10) >> 4;
+          if (pcrFlag === 1) {
+            hasPcr = true;
+            const b0 = packet[6];
+            const b1 = packet[7];
+            const b2 = packet[8];
+            const b3 = packet[9];
+            const b4 = packet[10];
+            pcrBase = (b0 * 256 + b1) * 65536 * 256 + (b2 << 16) + (b3 << 8) + (b4 >> 7);
+          }
+        }
+      }
+      
+      if (hasPcr) {
+        if (maxPcrBase === -1) {
+          maxPcrBase = pcrBase;
+          dropping = false;
+        } else {
+          if (pcrBase < maxPcrBase) {
+            const gap = maxPcrBase - pcrBase;
+            if (gap > 45000) { // >0.5 seconds backward time jump
+              if (!dropping) {
+                console.log(`[pcr-filter] Loop detected: PCR Base went back from ${maxPcrBase} to ${pcrBase} (gap: ${gap} ticks). Dropping duplicate packets.`);
+                dropping = true;
+              }
+            }
+          } else {
+            if (dropping) {
+              console.log(`[pcr-filter] Loop ended: PCR Base advanced to ${pcrBase} (max: ${maxPcrBase}). Resuming packet write.`);
+              dropping = false;
+            }
+            maxPcrBase = pcrBase;
+          }
+        }
+      }
+      
+      if (!dropping) {
+        packets.push(packet);
+      }
+    }
+    
+    return packets.length > 0 ? Buffer.concat(packets) : null;
+  }
+
   req.on('close', () => {
     isClosed = true;
     cleanupActiveStream();
@@ -318,9 +395,29 @@ app.get('/api/internal-stream', async (req, res) => {
 
       activeStream.on('data', (chunk) => {
         if (!isClosed) {
-          const writeOk = res.write(chunk);
-          if (!writeOk) {
-            activeStream.pause();
+          if (isMpegTs === null) {
+            bytesChecked += chunk.length;
+            if (chunk.indexOf(0x47) !== -1) {
+              isMpegTs = true;
+            } else if (bytesChecked > 500 * 1024) {
+              console.log('[internal-stream] Stream does not appear to be MPEG-TS. Bypassing PCR filter.');
+              isMpegTs = false;
+            }
+          }
+
+          if (isMpegTs === false) {
+            const writeOk = res.write(chunk);
+            if (!writeOk) {
+              activeStream.pause();
+            }
+          } else {
+            const filtered = filterMpegTsChunks(chunk);
+            if (filtered) {
+              const writeOk = res.write(filtered);
+              if (!writeOk) {
+                activeStream.pause();
+              }
+            }
           }
         }
       });
@@ -441,10 +538,10 @@ function spawnFfmpeg(url, audioCopy, headersStr) {
       '-preset', 'ultrafast',
       '-tune', 'zerolatency',
       '-crf', '28',
-      '-vf', 'scale=-2:720,format=yuv420p,setpts=if(eq(N\\,0)\\,PTS\\,if(gt(PTS\\,PREV_OUT_PTS)\\,PTS\\,nan))',
+      '-vf', 'scale=-2:720,format=yuv420p,setpts=if(eq(N\\,0)\\,PTS\\,if(gt(PTS\\,PREV_OUTPTS)\\,PTS\\,nan))',
       '-c:a', 'aac',
       '-b:a', '128k',
-      '-af', 'aresample=async=1,asetpts=if(eq(N\\,0)\\,PTS\\,if(gt(PTS\\,PREV_OUT_PTS)\\,PTS\\,nan))'
+      '-af', 'aresample=async=1,asetpts=if(eq(N\\,0)\\,PTS\\,if(gt(PTS\\,PREV_OUTPTS)\\,PTS\\,nan))'
     );
   }
 
