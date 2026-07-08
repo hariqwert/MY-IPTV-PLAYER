@@ -7,6 +7,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,600;1,9..144,500&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.5.13/hls.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mpegts.js@latest/dist/mpegts.min.js"></script>
 <style>
   :root {
     --bg: #08080a;
@@ -739,43 +740,37 @@ function playChannel(sourceId, channelId) {
   const channel = src.channels.find(c => c.id === channelId);
   if (!channel) return;
   
-  state.activeSourceId = sourceId;
+  if (state.activeChannelId !== channelId) {
+    state._restarts = 0;
+  }
   state.activeChannelId = channelId;
-  renderChannels();
-  hideError();
+  state.isFallback = false;
+  renderChannels(); hideError();
   document.getElementById('placeholder').style.display = 'none';
 
   // Clear any previous timeout and polling checks
   if (state._loadTimer) { clearTimeout(state._loadTimer); state._loadTimer = null; }
   if (state._pollTimer) { clearInterval(state._pollTimer); state._pollTimer = null; }
 
-  // Set up quality selector (unified direct & transcode)
+  // Reset quality selector
   const qSelect = document.getElementById('quality-select');
-  qSelect.innerHTML = `
-    <option value="transcode">Transcoded (Bypass)</option>
-    <option value="direct">Source (Direct)</option>
-  `;
-  if (!state.qualityMode) state.qualityMode = 'transcode';
-  qSelect.value = state.qualityMode;
-  document.getElementById('quality-selector-wrap').style.display = 'block';
+  qSelect.innerHTML = '<option value="-1">Auto</option>';
+  document.getElementById('quality-selector-wrap').style.display = 'none';
 
   const video = document.getElementById('video');
   video.style.display = 'block';
 
-  // Stop any previous active HLS streaming session on the backend
-  if (state.streamId) {
-    fetch('/api/stream/stop', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ streamId: state.streamId })
-    }).catch(e => console.warn('Failed to stop stream session:', e));
-    state.streamId = null;
+  // Clean up any active players — synchronous teardown BEFORE new player attaches
+  if (state.hls) { state.hls.destroy(); state.hls = null; }
+  if (state.mpegtsPlayer) {
+    try { state.mpegtsPlayer.unload(); } catch (e) {}
+    try { state.mpegtsPlayer.detachMediaElement(); } catch (e) {}
+    try { state.mpegtsPlayer.destroy(); } catch (e) {}
+    state.mpegtsPlayer = null;
   }
-
-  // Clean up any active player instances
-  if (state.hls) {
-    try { state.hls.destroy(); } catch (e) {}
-    state.hls = null;
+  if (state._nativeErrorListener) {
+    video.removeEventListener('error', state._nativeErrorListener);
+    state._nativeErrorListener = null;
   }
   video.removeAttribute('src');
   try { video.load(); } catch (e) {}
@@ -784,65 +779,194 @@ function playChannel(sourceId, channelId) {
     setStatus(''); 
     showError(msg); 
     if (state._pollTimer) { clearInterval(state._pollTimer); state._pollTimer = null; }
+    if (state._nativeErrorListener) {
+      video.removeEventListener('error', state._nativeErrorListener);
+      state._nativeErrorListener = null;
+    }
   }
 
-  setStatus('Connecting…');
+  function handleMpegtsRestart() {
+    if (state._restarts === undefined) state._restarts = 0;
+    if (state._restarts < 3) {
+      state._restarts++;
+      console.warn(`[mpegts-restart] Attempting clean player restart ${state._restarts}/3...`);
+      playChannel(state.activeSourceId, state.activeChannelId);
+    } else {
+      fail('Playback failed after multiple retries');
+    }
+  }
 
-  const mode = qSelect.value === 'transcode' ? 'transcode' : 'copy';
-  let startUrl = `/api/stream/start?url=${encodeURIComponent(channel.streamUrl)}&mode=${mode}`;
-  if (channel.referrer) startUrl += `&referer=${encodeURIComponent(channel.referrer)}`;
-  if (channel.userAgent) startUrl += `&userAgent=${encodeURIComponent(channel.userAgent)}`;
+  // Setup video element status polling every 2s
+  state._pollTimer = setInterval(() => {
+    let bufferedStr = 'none';
+    if (video.buffered && video.buffered.length > 0) {
+      bufferedStr = video.buffered.end(0).toFixed(2);
+    }
+    let errorStr = 'none';
+    if (video.error) {
+      errorStr = `code=${video.error.code}, message=${video.error.message}`;
+    }
+    console.log(`[video-poll] currentTime=${video.currentTime.toFixed(2)}, readyState=${video.readyState}, bufferedEnd=${bufferedStr}, error=${errorStr}`);
+  }, 2000);
 
-  fetch(startUrl)
-    .then(res => {
-      if (!res.ok) {
-        return res.text().then(text => { throw new Error(text || 'Playback initialization failed'); });
-      }
-      return res.json();
-    })
-    .then(data => {
-      state.streamId = data.streamId;
-      const playUrl = data.manifestUrl.startsWith('http') ? data.manifestUrl : window.location.origin + data.manifestUrl;
+  // Set up quality selector (unified direct & transcode)
+  qSelect.innerHTML = `
+    <option value="transcode">Transcoded (Bypass)</option>
+    <option value="direct">Source (Direct)</option>
+  `;
+  qSelect.value = 'transcode';
+  document.getElementById('quality-selector-wrap').style.display = 'block';
 
-      console.log('[player] Initializing HLS source:', playUrl);
-      
-      if (Hls.isSupported()) {
-        const hls = new Hls({
-          maxBufferSize: 10 * 1024 * 1024, // 10MB
-          maxBufferLength: 10,             // 10 seconds of max buffer
-          liveSyncPosition: 3,             // 3 seconds behind live edge
-          enableWorker: true
-        });
-        hls.loadSource(playUrl);
-        hls.attachMedia(video);
-        hls.on(Hls.Events.MANIFEST_PARSED, () => {
-          video.play().catch(e => console.warn('Play block:', e));
-        });
-        hls.on(Hls.Events.ERROR, (event, dataEvent) => {
-          if (dataEvent.fatal) {
-            console.warn('[hls-event] Fatal error, attempting recovery:', dataEvent.type);
-            switch (dataEvent.type) {
-              case Hls.ErrorTypes.NETWORK_ERROR:
-                hls.startLoad();
-                break;
-              case Hls.ErrorTypes.MEDIA_ERROR:
-                hls.recoverMediaError();
-                break;
-              default:
-                fail('Playback failed due to fatal decoder error');
-                break;
-            }
-          }
-        });
-        state.hls = hls;
-      } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-        video.src = playUrl;
-        video.play().catch(e => console.warn('Native HLS play block:', e));
+  let transcodeUrl = window.location.origin + '/api/stream-proxy?url=' + encodeURIComponent(channel.streamUrl) + '&transcode=true';
+  if (channel.referrer) transcodeUrl += '&referer=' + encodeURIComponent(channel.referrer);
+  if (channel.userAgent) transcodeUrl += '&userAgent=' + encodeURIComponent(channel.userAgent);
+
+  setStatus('Transcoding…');
+
+  if (mpegts.getFeatureList().mseLivePlayback) {
+    const player = mpegts.createPlayer({
+      type: 'mpegts',
+      isLive: true,
+      url: transcodeUrl
+    }, {
+      enableWorker: true,
+      enableStashBuffer: true,
+      stashInitialSize: 131072, // 128KB — fast startup, don't hold back data
+      lazyLoad: false,
+      liveBufferLatencyChasing: true,  // snap to live edge to avoid buffer growth stalls
+      liveBufferLatencyMaxLatency: 5.0, // max 5s behind live before chasing
+      liveBufferLatencyMinRemain: 1.0,  // keep at least 1s in buffer while chasing
+      liveSyncDuration: 2,              // target 2s behind live
+      liveMaxLatencyDuration: 5         // forcibly jump if > 5s behind
+    });
+    state.mpegtsPlayer = player;
+
+    player.on(mpegts.Events.ERROR, (type, detail, info) => {
+      console.log(`[mpegts-event] ERROR: type=${type}, detail=${detail}, info=`, info);
+      if (type === mpegts.ErrorTypes.NETWORK_ERROR) {
+        handleMpegtsRestart();
       } else {
-        fail('HLS playback is not supported by your browser');
+        console.error('mpegts OTHER_ERROR:', detail);
+        fail('Playback error — stream may be offline or blocked');
       }
+    });
 
-      // Setup status poll logger
+    // Attach native video error listener for decoder crashes
+    const onNativeVideoError = () => {
+      console.warn('[mpegts-native-error] video error fired, attempting restart...');
+      handleMpegtsRestart();
+    };
+    state._nativeErrorListener = onNativeVideoError;
+    video.addEventListener('error', onNativeVideoError, { once: true });
+
+    player.attachMediaElement(video);
+    player.load();
+    player.play().catch(e => console.warn('mpegts play block:', e));
+
+    // 25-second loading timeout
+    state._loadTimer = setTimeout(() => {
+      if (video.readyState < 3) {
+        fail('Connection timeout — stream not loading');
+      }
+    }, 25000);
+  } else {
+    fail('MSE not supported by this browser');
+  }
+}
+
+function changeQuality(val) {
+  const src = currentSource();
+  const channel = src && src.channels.find(c => c.id === state.activeChannelId);
+  if (!channel) return;
+  
+  const video = document.getElementById('video');
+  
+  if (state._nativeErrorListener) {
+    video.removeEventListener('error', state._nativeErrorListener);
+    state._nativeErrorListener = null;
+  }
+  if (state._pollTimer) { clearInterval(state._pollTimer); state._pollTimer = null; }
+
+  // Synchronous teardown — destroy old player BEFORE creating new one
+  if (state.mpegtsPlayer) {
+    try { state.mpegtsPlayer.unload(); } catch (e) {}
+    try { state.mpegtsPlayer.detachMediaElement(); } catch (e) {}
+    try { state.mpegtsPlayer.destroy(); } catch (e) {}
+    state.mpegtsPlayer = null;
+  }
+  video.removeAttribute('src');
+  try { video.load(); } catch (e) {}
+
+  // Shared mpegts.js config for live streams — fast start, live-edge chasing
+  const liveConfig = {
+    enableWorker: true,
+    enableStashBuffer: true,
+    stashInitialSize: 131072,         // 128KB — minimal startup hold
+    lazyLoad: false,
+    liveBufferLatencyChasing: true,   // always snap to live edge
+    liveBufferLatencyMaxLatency: 5.0, // start chasing if > 5s behind
+    liveBufferLatencyMinRemain: 1.0,  // keep 1s buffer while chasing
+    liveSyncDuration: 2,              // target 2s behind live
+    liveMaxLatencyDuration: 5         // hard-jump if > 5s behind
+  };
+
+  if (val === 'transcode') {
+    setStatus('Transcoding…');
+    let proxyUrl = window.location.origin + '/api/stream-proxy?url=' + encodeURIComponent(channel.streamUrl) + '&transcode=true';
+    if (channel.referrer) proxyUrl += '&referer=' + encodeURIComponent(channel.referrer);
+    if (channel.userAgent) proxyUrl += '&userAgent=' + encodeURIComponent(channel.userAgent);
+    
+    if (mpegts.getFeatureList().mseLivePlayback) {
+      const player = mpegts.createPlayer({
+        type: 'mpegts',
+        isLive: true,
+        url: proxyUrl
+      }, liveConfig);
+      state.mpegtsPlayer = player;
+      player.attachMediaElement(video);
+      player.load();
+      player.play().catch(e => console.warn('[transcode-fallback] play block:', e));
+
+      player.on(mpegts.Events.ERROR, (type, detail, info) => {
+        console.error('[transcode-fallback-mpegts] ERROR:', type, detail);
+        setStatus('');
+        showError('Transcoding failed — stream unreadable', true);
+      });
+    } else {
+      setStatus('');
+      showError('Transcoding failed — MSE not supported', false);
+    }
+  } else {
+    // direct quality — zero-FFmpeg passthrough
+    setStatus('Loading…');
+    if (mpegts.getFeatureList().mseLivePlayback) {
+      let rawProxyUrl = window.location.origin + '/api/internal-stream?url=' + encodeURIComponent(channel.streamUrl);
+      if (channel.referrer) rawProxyUrl += '&referer=' + encodeURIComponent(channel.referrer);
+      if (channel.userAgent) rawProxyUrl += '&userAgent=' + encodeURIComponent(channel.userAgent);
+      
+      const player = mpegts.createPlayer({
+        type: 'mpegts',
+        isLive: true,
+        url: rawProxyUrl
+      }, liveConfig);
+      state.mpegtsPlayer = player;
+
+      player.on(mpegts.Events.ERROR, (type, detail, info) => {
+        console.log(`[mpegts-event] ERROR: type=${type}, detail=${detail}, info=`, info);
+        if (type === mpegts.ErrorTypes.NETWORK_ERROR) {
+          playChannel(state.activeSourceId, state.activeChannelId);
+        } else {
+          console.error('[mpegts-event] OTHER_ERROR:', detail);
+          setStatus('');
+          showError('Playback error — stream may be offline or blocked');
+        }
+      });
+
+      player.attachMediaElement(video);
+      player.load();
+      player.play().catch(e => console.warn('mpegts play block:', e));
+
+      // Setup video status polling
       state._pollTimer = setInterval(() => {
         let bufferedStr = 'none';
         if (video.buffered && video.buffered.length > 0) {
@@ -854,23 +978,11 @@ function playChannel(sourceId, channelId) {
         }
         console.log(`[video-poll] currentTime=${video.currentTime.toFixed(2)}, readyState=${video.readyState}, bufferedEnd=${bufferedStr}, error=${errorStr}`);
       }, 2000);
-
-      // Loading timeout
-      state._loadTimer = setTimeout(() => {
-        if (video.readyState < 3) {
-          fail('Connection timeout — stream not loading');
-        }
-      }, 25000);
-    })
-    .catch(err => {
-      fail('Failed to connect to stream: ' + err.message);
-    });
-}
-
-function changeQuality(val) {
-  state.qualityMode = val;
-  if (state.activeSourceId && state.activeChannelId) {
-    playChannel(state.activeSourceId, state.activeChannelId);
+    } else {
+      const qSelect = document.getElementById('quality-select');
+      if (qSelect) qSelect.value = 'transcode';
+      changeQuality('transcode');
+    }
   }
 }
 
@@ -1015,14 +1127,6 @@ window.addEventListener('DOMContentLoaded', async () => {
       console.error('Failed to load default source:', e);
     }
   }
-
-  // Handle page unload to terminate active streaming processes
-  window.addEventListener('beforeunload', () => {
-    if (state.streamId) {
-      const blob = new Blob([JSON.stringify({ streamId: state.streamId })], { type: 'application/json' });
-      navigator.sendBeacon('/api/stream/stop', blob);
-    }
-  });
 });
 </script>
 </body>
