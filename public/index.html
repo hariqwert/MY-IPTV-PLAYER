@@ -820,7 +820,7 @@ function playChannel(sourceId, channelId) {
   qSelect.value = 'transcode';
   document.getElementById('quality-selector-wrap').style.display = 'block';
 
-  let transcodeUrl = '/api/stream-proxy?url=' + encodeURIComponent(channel.streamUrl) + '&transcode=true';
+  let transcodeUrl = window.location.origin + '/api/stream-proxy?url=' + encodeURIComponent(channel.streamUrl) + '&transcode=true';
   if (channel.referrer) transcodeUrl += '&referer=' + encodeURIComponent(channel.referrer);
   if (channel.userAgent) transcodeUrl += '&userAgent=' + encodeURIComponent(channel.userAgent);
 
@@ -900,7 +900,7 @@ function changeQuality(val) {
 
     if (val === 'transcode') {
       setStatus('Transcoding…');
-      let proxyUrl = '/api/stream-proxy?url=' + encodeURIComponent(channel.streamUrl) + '&transcode=true';
+      let proxyUrl = window.location.origin + '/api/stream-proxy?url=' + encodeURIComponent(channel.streamUrl) + '&transcode=true';
       if (channel.referrer) proxyUrl += '&referer=' + encodeURIComponent(channel.referrer);
       if (channel.userAgent) proxyUrl += '&userAgent=' + encodeURIComponent(channel.userAgent);
       
@@ -934,7 +934,7 @@ function changeQuality(val) {
       // direct quality (use mpegts.js if supported)
       setStatus('Loading…');
       if (mpegts.getFeatureList().mseLivePlayback) {
-        let rawProxyUrl = '/api/stream-proxy-raw?url=' + encodeURIComponent(channel.streamUrl);
+        let rawProxyUrl = window.location.origin + '/api/stream-proxy-raw?url=' + encodeURIComponent(channel.streamUrl);
         if (channel.referrer) rawProxyUrl += '&referer=' + encodeURIComponent(channel.referrer);
         if (channel.userAgent) rawProxyUrl += '&userAgent=' + encodeURIComponent(channel.userAgent);
         
