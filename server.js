@@ -432,9 +432,12 @@ function spawnFfmpeg(url, audioCopy, headersStr) {
       '-preset', 'ultrafast',
       '-tune', 'zerolatency',
       '-crf', '28',
+      '-r', '25',
       '-vf', 'scale=-2:720,format=yuv420p',
+      '-vsync', 'cfr',
       '-c:a', 'aac',
-      '-b:a', '128k'
+      '-b:a', '128k',
+      '-af', 'aresample=async=1'
     );
   }
 
@@ -483,7 +486,7 @@ app.get('/api/stream-proxy', async (req, res) => {
     else headersStr += `User-Agent: VLC/3.0.18 LibVLC/3.0.18\r\n`;
     console.log('[proxy] Spawning ffmpeg transcoder with direct HLS URL:', inputUrl);
   } else {
-    inputUrl = `http://localhost:${PORT}/api/internal-stream?url=${encodeURIComponent(resolvedUrl)}&referer=${encodeURIComponent(referer || '')}&userAgent=${encodeURIComponent(userAgentParam || '')}`;
+    inputUrl = `http://localhost:${PORT}/api/internal-stream?url=${encodeURIComponent(streamUrl)}&referer=${encodeURIComponent(referer || '')}&userAgent=${encodeURIComponent(userAgentParam || '')}`;
     console.log('[proxy] Spawning ffmpeg transcoder with loopback URL:', inputUrl);
   }
 
@@ -575,7 +578,7 @@ app.get('/api/stream-proxy-raw', async (req, res) => {
     else headersStr += `User-Agent: VLC/3.0.18 LibVLC/3.0.18\r\n`;
     console.log('[proxy-raw] Spawning ffmpeg copy remuxer with direct HLS URL:', inputUrl);
   } else {
-    inputUrl = `http://localhost:${PORT}/api/internal-stream?url=${encodeURIComponent(resolvedUrl)}&referer=${encodeURIComponent(referer || '')}&userAgent=${encodeURIComponent(userAgentParam || '')}`;
+    inputUrl = `http://localhost:${PORT}/api/internal-stream?url=${encodeURIComponent(streamUrl)}&referer=${encodeURIComponent(referer || '')}&userAgent=${encodeURIComponent(userAgentParam || '')}`;
     console.log('[proxy-raw] Spawning ffmpeg copy remuxer with loopback URL:', inputUrl);
   }
 
