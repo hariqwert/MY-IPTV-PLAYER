@@ -295,6 +295,7 @@ app.get('/api/internal-stream', async (req, res) => {
   res.setHeader('Content-Type', 'video/mp2t');
   res.setHeader('Access-Control-Allow-Origin', '*');
 
+  let totalBytesStreamed = 0;
   let activeStream = null;
   let isClosed = false;
 
@@ -307,8 +308,13 @@ app.get('/api/internal-stream', async (req, res) => {
     if (isClosed) return;
 
     try {
-      console.log(`[internal-stream] Connecting to upstream: ${streamUrl}`);
-      const response = await getStreamWithRedirects(streamUrl, headers);
+      const currentHeaders = {
+        ...headers,
+        ...(totalBytesStreamed > 0 ? { 'Range': `bytes=${totalBytesStreamed}-` } : {})
+      };
+
+      console.log(`[internal-stream] Connecting to upstream: ${streamUrl} (offset: ${totalBytesStreamed} bytes)`);
+      const response = await getStreamWithRedirects(streamUrl, currentHeaders);
       if (isClosed) {
         try { response.data.destroy(); } catch (e) {}
         return;
@@ -318,28 +324,42 @@ app.get('/api/internal-stream', async (req, res) => {
 
       activeStream.on('data', (chunk) => {
         if (!isClosed) {
-          res.write(chunk);
+          totalBytesStreamed += chunk.length;
+          const writeOk = res.write(chunk);
+          if (!writeOk) {
+            activeStream.pause();
+          }
         }
       });
 
       activeStream.on('end', () => {
         console.log('[internal-stream] Upstream ended cleanly. Reconnecting...');
         cleanupActiveStream();
-        setTimeout(startStreaming, 1000); // Reconnect after 1 second
+        setTimeout(startStreaming, 50); // Reconnect in 50ms
       });
 
       activeStream.on('error', (err) => {
         console.warn('[internal-stream] Upstream error, reconnecting:', err.message);
         cleanupActiveStream();
-        setTimeout(startStreaming, 3000); // Reconnect after 3 seconds
+        setTimeout(startStreaming, 500); // Reconnect in 500ms
       });
 
     } catch (err) {
       console.error('[internal-stream] Upstream connection failure, retrying:', err.message);
       if (isClosed) return;
-      setTimeout(startStreaming, 5000); // Retry after 5 seconds
+      if (err.response && err.response.status === 416) {
+        console.warn('[internal-stream] Range not satisfiable (416). Resetting byte offset to 0.');
+        totalBytesStreamed = 0;
+      }
+      setTimeout(startStreaming, 1000); // Retry in 1000ms
     }
   }
+
+  res.on('drain', () => {
+    if (activeStream && activeStream.isPaused()) {
+      activeStream.resume();
+    }
+  });
 
   function cleanupActiveStream() {
     if (activeStream) {
@@ -416,8 +436,8 @@ function spawnFfmpeg(url, audioCopy, headersStr) {
     '-correct_ts_overflow', '1',
     '-avoid_negative_ts', 'make_zero',
     '-flags', '+global_header',
-    '-analyzeduration', '3000000',
-    '-probesize', '3000000',
+    '-analyzeduration', '1000000',
+    '-probesize', '1000000',
     '-i', url
   );
 
