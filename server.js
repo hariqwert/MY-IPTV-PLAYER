@@ -289,6 +289,7 @@ app.get('/api/internal-stream', async (req, res) => {
   const headers = {
     'User-Agent': ua,
     'Accept': '*/*',
+    'Connection': 'keep-alive',
     ...(referer ? { 'Referer': referer } : {})
   };
 
@@ -416,7 +417,6 @@ function spawnFfmpeg(url, audioCopy, headersStr) {
   }
 
   args.push(
-    '-re',
     '-fflags', '+genpts+igndts+discardcorrupt',
     '-correct_ts_overflow', '1',
     '-avoid_negative_ts', 'make_zero',
