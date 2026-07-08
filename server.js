@@ -413,9 +413,10 @@ app.get('/api/stream/start', async (req, res) => {
         '-preset', 'ultrafast',
         '-tune', 'zerolatency',
         '-crf', '28',
-        '-vf', 'scale=-2:720,format=yuv420p',
+        '-vf', 'scale=-2:720,format=yuv420p,setpts=if(eq(N\\,0)\\,PTS\\,if(gt(PTS\\,PREV_OUTPTS)\\,PTS\\,nan))',
         '-c:a', 'aac',
-        '-b:a', '128k'
+        '-b:a', '128k',
+        '-af', 'aresample=async=1,asetpts=if(eq(N\\,0)\\,PTS\\,if(gt(PTS\\,PREV_OUTPTS)\\,PTS\\,nan))'
       );
     }
 
