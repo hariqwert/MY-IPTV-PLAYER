@@ -442,10 +442,10 @@ function spawnFfmpeg(url, audioCopy, headersStr) {
       '-preset', 'ultrafast',
       '-tune', 'zerolatency',
       '-crf', '28',
-      '-vf', 'scale=-2:720,format=yuv420p,setpts=if(eq(N\\,0)\\,PTS\\,if(gt(PTS\\,PREV_OUTPTS)\\,PTS\\,nan))',
+      '-vf', 'scale=-2:720,format=yuv420p',
       '-c:a', 'aac',
       '-b:a', '128k',
-      '-af', 'aresample=async=1,asetpts=if(eq(N\\,0)\\,PTS\\,if(gt(PTS\\,PREV_OUTPTS)\\,PTS\\,nan))'
+      '-af', 'aresample=async=1'
     );
   }
 
