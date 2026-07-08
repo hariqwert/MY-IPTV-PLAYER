@@ -831,13 +831,9 @@ function playChannel(sourceId, channelId) {
     }, {
       enableWorker: true,
       enableStashBuffer: true,
-      stashInitialSize: 131072, // 128KB — fast startup, don't hold back data
+      stashInitialSize: 524288, // 512KB startup buffer (absorbs connection gaps)
       lazyLoad: false,
-      liveBufferLatencyChasing: true,  // snap to live edge to avoid buffer growth stalls
-      liveBufferLatencyMaxLatency: 5.0, // max 5s behind live before chasing
-      liveBufferLatencyMinRemain: 1.0,  // keep at least 1s in buffer while chasing
-      liveSyncDuration: 2,              // target 2s behind live
-      liveMaxLatencyDuration: 5         // forcibly jump if > 5s behind
+      liveBufferLatencyChasing: false
     });
     state.mpegtsPlayer = player;
 
@@ -897,17 +893,13 @@ function changeQuality(val) {
   video.removeAttribute('src');
   try { video.load(); } catch (e) {}
 
-  // Shared mpegts.js config for live streams — fast start, live-edge chasing
+  // Shared mpegts.js config for live streams — fast start, no chasing stalls
   const liveConfig = {
     enableWorker: true,
     enableStashBuffer: true,
-    stashInitialSize: 131072,         // 128KB — minimal startup hold
+    stashInitialSize: 524288,         // 512KB startup buffer (absorbs connection gaps)
     lazyLoad: false,
-    liveBufferLatencyChasing: true,   // always snap to live edge
-    liveBufferLatencyMaxLatency: 5.0, // start chasing if > 5s behind
-    liveBufferLatencyMinRemain: 1.0,  // keep 1s buffer while chasing
-    liveSyncDuration: 2,              // target 2s behind live
-    liveMaxLatencyDuration: 5         // hard-jump if > 5s behind
+    liveBufferLatencyChasing: false
   };
 
   if (val === 'transcode') {

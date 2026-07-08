@@ -424,17 +424,11 @@ app.get('/api/internal-stream', async (req, res) => {
           }
 
           if (isMpegTs === false) {
-            const writeOk = res.write(chunk);
-            if (!writeOk) {
-              activeStream.pause();
-            }
+            res.write(chunk);
           } else {
             const filtered = filterMpegTsChunks(chunk);
             if (filtered) {
-              const writeOk = res.write(filtered);
-              if (!writeOk) {
-                activeStream.pause();
-              }
+              res.write(filtered);
             }
           }
         }
@@ -458,12 +452,6 @@ app.get('/api/internal-stream', async (req, res) => {
       setTimeout(startStreaming, 1500); // Retry in 1500ms
     }
   }
-
-  res.on('drain', () => {
-    if (activeStream && activeStream.isPaused()) {
-      activeStream.resume();
-    }
-  });
 
   function cleanupActiveStream() {
     if (activeStream) {
