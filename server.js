@@ -298,95 +298,6 @@ app.get('/api/internal-stream', async (req, res) => {
   let activeStream = null;
   let isClosed = false;
 
-  // Real-time MPEG-TS PCR filter state to drop duplicate reconnect bursts in Direct Play
-  let mpegTsBuffer = Buffer.alloc(0);
-  let maxPcrBase = -1;
-  let dropping = false;
-  let isMpegTs = null; // null = checking, true = yes, false = no
-  let bytesChecked = 0;
-  let lastConnectTime = 0;
-
-  function filterMpegTsChunks(chunk) {
-    mpegTsBuffer = Buffer.concat([mpegTsBuffer, chunk]);
-    const packets = [];
-    const now = Date.now();
-    const timeSinceConnect = now - lastConnectTime;
-    
-    // Safety: Force disable dropping after 4 seconds of connection to prevent permanent lockups
-    if (dropping && timeSinceConnect > 4000) {
-      console.log('[pcr-filter] Reconnect burst window expired. Forcing resume.');
-      dropping = false;
-    }
-    
-    while (mpegTsBuffer.length >= 188) {
-      if (mpegTsBuffer[0] !== 0x47) {
-        let syncIndex = mpegTsBuffer.indexOf(0x47);
-        if (syncIndex === -1) {
-          mpegTsBuffer = Buffer.alloc(0);
-          break;
-        }
-        mpegTsBuffer = mpegTsBuffer.slice(syncIndex);
-        if (mpegTsBuffer.length < 188) break;
-      }
-      
-      const packet = mpegTsBuffer.slice(0, 188);
-      mpegTsBuffer = mpegTsBuffer.slice(188);
-      
-      const adaptationFieldControl = (packet[3] & 0x30) >> 4;
-      let hasPcr = false;
-      let pcrBase = -1;
-      
-      if (adaptationFieldControl === 2 || adaptationFieldControl === 3) {
-        const adaptationFieldLength = packet[4];
-        if (adaptationFieldLength > 0) {
-          const flags = packet[5];
-          const pcrFlag = (flags & 0x10) >> 4;
-          if (pcrFlag === 1) {
-            hasPcr = true;
-            const b0 = packet[6];
-            const b1 = packet[7];
-            const b2 = packet[8];
-            const b3 = packet[9];
-            const b4 = packet[10];
-            pcrBase = (b0 * 256 + b1) * 65536 * 256 + (b2 << 16) + (b3 << 8) + (b4 >> 7);
-          }
-        }
-      }
-      
-      if (hasPcr) {
-        if (maxPcrBase === -1) {
-          maxPcrBase = pcrBase;
-          dropping = false;
-        } else {
-          if (dropping && timeSinceConnect <= 4000) {
-            if (pcrBase >= maxPcrBase) {
-              console.log(`[pcr-filter] Reconnect burst caught up: PCR Base advanced to ${pcrBase} (max: ${maxPcrBase}). Resuming packet write.`);
-              dropping = false;
-              maxPcrBase = pcrBase;
-            }
-          } else {
-            if (pcrBase < maxPcrBase) {
-              const gap = maxPcrBase - pcrBase;
-              // Only drop if it is a major backward jump (>0.5s) within the first 4s window
-              if (gap > 45000 && timeSinceConnect <= 4000) {
-                console.log(`[pcr-filter] Loop detected: PCR Base went back from ${maxPcrBase} to ${pcrBase} (gap: ${gap} ticks). Dropping duplicate packets.`);
-                dropping = true;
-              }
-            } else {
-              maxPcrBase = pcrBase;
-            }
-          }
-        }
-      }
-      
-      if (!dropping) {
-        packets.push(packet);
-      }
-    }
-    
-    return packets.length > 0 ? Buffer.concat(packets) : null;
-  }
-
   req.on('close', () => {
     isClosed = true;
     cleanupActiveStream();
@@ -404,52 +315,29 @@ app.get('/api/internal-stream', async (req, res) => {
       }
 
       activeStream = response.data;
-      lastConnectTime = Date.now();
-      
-      // If we had a previous maxPcrBase, start in dropping mode to drop the cached burst
-      if (maxPcrBase !== -1) {
-        dropping = true;
-      }
 
       activeStream.on('data', (chunk) => {
         if (!isClosed) {
-          if (isMpegTs === null) {
-            bytesChecked += chunk.length;
-            if (chunk.indexOf(0x47) !== -1) {
-              isMpegTs = true;
-            } else if (bytesChecked > 500 * 1024) {
-              console.log('[internal-stream] Stream does not appear to be MPEG-TS. Bypassing PCR filter.');
-              isMpegTs = false;
-            }
-          }
-
-          if (isMpegTs === false) {
-            res.write(chunk);
-          } else {
-            const filtered = filterMpegTsChunks(chunk);
-            if (filtered) {
-              res.write(filtered);
-            }
-          }
+          res.write(chunk);
         }
       });
 
       activeStream.on('end', () => {
         console.log('[internal-stream] Upstream ended cleanly. Reconnecting in 1000ms...');
         cleanupActiveStream();
-        setTimeout(startStreaming, 1000); // Back off to 1000ms
+        setTimeout(startStreaming, 1000);
       });
 
       activeStream.on('error', (err) => {
         console.warn('[internal-stream] Upstream error, reconnecting in 1500ms:', err.message);
         cleanupActiveStream();
-        setTimeout(startStreaming, 1500); // Back off to 1500ms
+        setTimeout(startStreaming, 1500);
       });
 
     } catch (err) {
-      console.error('[internal-stream] Upstream connection failure, retrying:', err.message);
+      console.error('[internal-stream] Upstream connection failure, retrying in 1500ms:', err.message);
       if (isClosed) return;
-      setTimeout(startStreaming, 1500); // Retry in 1500ms
+      setTimeout(startStreaming, 1500);
     }
   }
 
@@ -594,14 +482,11 @@ app.get('/api/stream-proxy', async (req, res) => {
 
   const isHls = streamUrl.toLowerCase().includes('.m3u8') || streamUrl.toLowerCase().includes('.m3u') || streamUrl.toLowerCase().includes('/hls/');
 
-  const inputUrl = streamUrl;
-  let headersStr = '';
-  if (referer) headersStr += `Referer: ${referer}\r\n`;
-  if (userAgentParam) headersStr += `User-Agent: ${userAgentParam}\r\n`;
-  else headersStr += `User-Agent: VLC/3.0.18 LibVLC/3.0.18\r\n`;
+  const inputUrl = `http://localhost:${PORT}/api/internal-stream?url=${encodeURIComponent(streamUrl)}&referer=${encodeURIComponent(referer || '')}&userAgent=${encodeURIComponent(userAgentParam || '')}`;
+  const headersStr = null;
 
   const transcode = req.query.transcode === 'true';
-  console.log(`[proxy] Spawning ffmpeg (transcode=${transcode}) directly to upstream URL:`, inputUrl);
+  console.log(`[proxy] Spawning ffmpeg (transcode=${transcode}) with loopback URL:`, inputUrl);
 
   const ffmpeg = spawnFfmpeg(inputUrl, !transcode, headersStr);
 
