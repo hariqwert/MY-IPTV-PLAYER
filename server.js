@@ -357,16 +357,72 @@ app.get('/api/internal-stream', async (req, res) => {
   startStreaming();
 });
 
-function spawnFfmpeg(url, audioCopy) {
-  const args = [
-    '-fflags', '+genpts+igndts+discardcorrupt+nobuffer',
+async function resolveRedirects(urlStr, headers) {
+  let currentUrl = urlStr;
+  let redirectCount = 0;
+  const maxRedirects = 5;
+
+  while (redirectCount < maxRedirects) {
+    try {
+      const response = await axios.head(currentUrl, {
+        headers,
+        maxRedirects: 0,
+        validateStatus: (status) => status >= 200 && status < 400
+      });
+
+      if (response.status >= 300 && response.status < 400) {
+        const location = response.headers['location'];
+        if (location) {
+          currentUrl = location.startsWith('http') ? location : new URL(location, currentUrl).href;
+          redirectCount++;
+          continue;
+        }
+      }
+      return currentUrl;
+    } catch (e) {
+      try {
+        const response = await axios.get(currentUrl, {
+          headers: { ...headers, Range: 'bytes=0-0' },
+          maxRedirects: 0,
+          validateStatus: (status) => status >= 200 && status < 400
+        });
+        if (response.status >= 300 && response.status < 400) {
+          const location = response.headers['location'];
+          if (location) {
+            currentUrl = location.startsWith('http') ? location : new URL(location, currentUrl).href;
+            redirectCount++;
+            continue;
+          }
+        }
+        return currentUrl;
+      } catch (err2) {
+        return currentUrl;
+      }
+    }
+  }
+  return currentUrl;
+}
+
+function spawnFfmpeg(url, audioCopy, headersStr) {
+  const args = [];
+  if (headersStr) {
+    args.push('-headers', headersStr);
+  }
+
+  const isHls = url.toLowerCase().includes('.m3u8') || url.toLowerCase().includes('.m3u') || url.toLowerCase().includes('/hls/');
+  if (isHls) {
+    args.push('-live_start_index', '-3');
+  }
+
+  args.push(
+    '-fflags', '+genpts+igndts+discardcorrupt',
     '-correct_ts_overflow', '1',
     '-avoid_negative_ts', 'make_zero',
-    '-flags', '+low_delay+global_header',
-    '-analyzeduration', '1000000',
-    '-probesize', '1000000',
+    '-flags', '+global_header',
+    '-analyzeduration', '3000000',
+    '-probesize', '3000000',
     '-i', url
-  ];
+  );
 
   if (audioCopy) {
     args.push(
@@ -405,11 +461,31 @@ app.get('/api/stream-proxy', async (req, res) => {
     abortController.abort();
   });
 
-  // Target the local loopback internal-stream route to bypass CDN fingerprint blocks
-  const internalUrl = `http://localhost:${PORT}/api/internal-stream?url=${encodeURIComponent(streamUrl)}&referer=${encodeURIComponent(referer || '')}&userAgent=${encodeURIComponent(userAgentParam || '')}`;
-  console.log('[proxy] Spawning ffmpeg transcoder for internal loopback URL:', internalUrl);
-  
-  const ffmpeg = spawnFfmpeg(internalUrl, false); // Transcode audio to aac
+  const headers = {
+    'User-Agent': userAgentParam || 'VLC/3.0.18 LibVLC/3.0.18',
+    'Accept': '*/*',
+    ...(referer ? { 'Referer': referer } : {})
+  };
+
+  const resolvedUrl = await resolveRedirects(streamUrl, headers);
+  const isHls = resolvedUrl.toLowerCase().includes('.m3u8') || resolvedUrl.toLowerCase().includes('.m3u') || resolvedUrl.toLowerCase().includes('/hls/');
+
+  let inputUrl;
+  let headersStr = null;
+
+  if (isHls) {
+    inputUrl = resolvedUrl;
+    headersStr = '';
+    if (referer) headersStr += `Referer: ${referer}\r\n`;
+    if (userAgentParam) headersStr += `User-Agent: ${userAgentParam}\r\n`;
+    else headersStr += `User-Agent: VLC/3.0.18 LibVLC/3.0.18\r\n`;
+    console.log('[proxy] Spawning ffmpeg transcoder with direct HLS URL:', inputUrl);
+  } else {
+    inputUrl = `http://localhost:${PORT}/api/internal-stream?url=${encodeURIComponent(resolvedUrl)}&referer=${encodeURIComponent(referer || '')}&userAgent=${encodeURIComponent(userAgentParam || '')}`;
+    console.log('[proxy] Spawning ffmpeg transcoder with loopback URL:', inputUrl);
+  }
+
+  const ffmpeg = spawnFfmpeg(inputUrl, false, headersStr);
 
   if (res.socket) res.socket.setNoDelay(true);
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -477,11 +553,31 @@ app.get('/api/stream-proxy-raw', async (req, res) => {
     abortController.abort();
   });
 
-  // Target the local loopback internal-stream route to bypass CDN fingerprint blocks
-  const internalUrl = `http://localhost:${PORT}/api/internal-stream?url=${encodeURIComponent(streamUrl)}&referer=${encodeURIComponent(referer || '')}&userAgent=${encodeURIComponent(userAgentParam || '')}`;
-  console.log('[proxy-raw] Spawning ffmpeg copy remuxer for internal loopback URL:', internalUrl);
-  
-  const ffmpeg = spawnFfmpeg(internalUrl, true); // Copy video & audio directly (0% CPU)
+  const headers = {
+    'User-Agent': userAgentParam || 'VLC/3.0.18 LibVLC/3.0.18',
+    'Accept': '*/*',
+    ...(referer ? { 'Referer': referer } : {})
+  };
+
+  const resolvedUrl = await resolveRedirects(streamUrl, headers);
+  const isHls = resolvedUrl.toLowerCase().includes('.m3u8') || resolvedUrl.toLowerCase().includes('.m3u') || resolvedUrl.toLowerCase().includes('/hls/');
+
+  let inputUrl;
+  let headersStr = null;
+
+  if (isHls) {
+    inputUrl = resolvedUrl;
+    headersStr = '';
+    if (referer) headersStr += `Referer: ${referer}\r\n`;
+    if (userAgentParam) headersStr += `User-Agent: ${userAgentParam}\r\n`;
+    else headersStr += `User-Agent: VLC/3.0.18 LibVLC/3.0.18\r\n`;
+    console.log('[proxy-raw] Spawning ffmpeg copy remuxer with direct HLS URL:', inputUrl);
+  } else {
+    inputUrl = `http://localhost:${PORT}/api/internal-stream?url=${encodeURIComponent(resolvedUrl)}&referer=${encodeURIComponent(referer || '')}&userAgent=${encodeURIComponent(userAgentParam || '')}`;
+    console.log('[proxy-raw] Spawning ffmpeg copy remuxer with loopback URL:', inputUrl);
+  }
+
+  const ffmpeg = spawnFfmpeg(inputUrl, true, headersStr);
 
   if (res.socket) res.socket.setNoDelay(true);
   res.setHeader('Access-Control-Allow-Origin', '*');

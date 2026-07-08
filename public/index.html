@@ -760,16 +760,23 @@ function playChannel(sourceId, channelId) {
   const video = document.getElementById('video');
   video.style.display = 'block';
 
-  // Clean up any active players (capture references synchronously)
-  const oldHls = state.hls;
-  state.hls = null;
+  // Clean up any active players
+  if (state.hls) { state.hls.destroy(); state.hls = null; }
   const oldMpegtsPlayer = state.mpegtsPlayer;
   state.mpegtsPlayer = null;
-
+  if (oldMpegtsPlayer) {
+    setTimeout(() => {
+      try { oldMpegtsPlayer.unload(); } catch (e) {}
+      try { oldMpegtsPlayer.detachMediaElement(); } catch (e) {}
+      try { oldMpegtsPlayer.destroy(); } catch (e) {}
+    }, 0);
+  }
   if (state._nativeErrorListener) {
     video.removeEventListener('error', state._nativeErrorListener);
     state._nativeErrorListener = null;
   }
+  video.removeAttribute('src');
+  try { video.load(); } catch (e) {}
 
   function fail(msg) { 
     setStatus(''); 
@@ -788,221 +795,85 @@ function playChannel(sourceId, channelId) {
       console.warn(`[mpegts-restart] Attempting clean player restart ${state._restarts}/3...`);
       playChannel(state.activeSourceId, state.activeChannelId);
     } else {
-      console.warn('[mpegts-restart] Max restarts reached, falling back to transcoding.');
-      fallbackToTranscode();
+      fail('Playback failed after multiple retries');
     }
   }
 
-  function fallbackToTranscode() {
-    if (state.isFallback) {
-      console.warn('[fallback] Already in fallback mode, ignoring recursive fallback.');
-      return;
+  // Setup video element status polling every 2s
+  state._pollTimer = setInterval(() => {
+    let bufferedStr = 'none';
+    if (video.buffered && video.buffered.length > 0) {
+      bufferedStr = video.buffered.end(0).toFixed(2);
     }
-    state.isFallback = true;
-
-    if (state._nativeErrorListener) {
-      video.removeEventListener('error', state._nativeErrorListener);
-      state._nativeErrorListener = null;
+    let errorStr = 'none';
+    if (video.error) {
+      errorStr = `code=${video.error.code}, message=${video.error.message}`;
     }
+    console.log(`[video-poll] currentTime=${video.currentTime.toFixed(2)}, readyState=${video.readyState}, bufferedEnd=${bufferedStr}, error=${errorStr}`);
+  }, 2000);
 
-    const oldMpegtsPlayerRef = state.mpegtsPlayer;
-    state.mpegtsPlayer = null;
+  // Set up quality selector (unified direct & transcode)
+  qSelect.innerHTML = `
+    <option value="transcode">Transcoded (Bypass)</option>
+    <option value="direct">Source (Direct)</option>
+  `;
+  qSelect.value = 'transcode';
+  document.getElementById('quality-selector-wrap').style.display = 'block';
 
-    // Wrap both destruction and construction in the same deferred execution block
-    setTimeout(() => {
-      if (oldMpegtsPlayerRef) {
-        try { oldMpegtsPlayerRef.unload(); } catch (e) {}
-        try { oldMpegtsPlayerRef.detachMediaElement(); } catch (e) {}
-        try { oldMpegtsPlayerRef.destroy(); } catch (e) {}
-      }
-      video.removeAttribute('src');
-      try { video.load(); } catch (e) {}
+  let transcodeUrl = '/api/stream-proxy?url=' + encodeURIComponent(channel.streamUrl) + '&transcode=true';
+  if (channel.referrer) transcodeUrl += '&referer=' + encodeURIComponent(channel.referrer);
+  if (channel.userAgent) transcodeUrl += '&userAgent=' + encodeURIComponent(channel.userAgent);
 
-      // Set up the fallback transcoding source using mpegts.js
-      setStatus('Transcoding (Format Fallback)…');
-      qSelect.value = 'transcode';
+  setStatus('Transcoding…');
 
-      let transcodeUrl = '/api/stream-proxy?url=' + encodeURIComponent(channel.streamUrl) + '&transcode=true';
-      if (channel.referrer) transcodeUrl += '&referer=' + encodeURIComponent(channel.referrer);
-      if (channel.userAgent) transcodeUrl += '&userAgent=' + encodeURIComponent(channel.userAgent);
+  if (mpegts.getFeatureList().mseLivePlayback) {
+    const player = mpegts.createPlayer({
+      type: 'mpegts',
+      isLive: true,
+      url: transcodeUrl
+    }, {
+      enableWorker: true,
+      enableStashBuffer: true,
+      stashInitialSize: 524288, // 512KB startup buffer
+      lazyLoad: false,
+      liveBufferLatencyChasing: false
+    });
+    state.mpegtsPlayer = player;
 
-      console.log('[fallback] Loading transcoded stream via mpegts.js:', transcodeUrl);
-
-      if (mpegts.getFeatureList().mseLivePlayback) {
-        const player = mpegts.createPlayer({
-          type: 'mpegts',
-          isLive: true,
-          url: transcodeUrl
-        });
-        state.mpegtsPlayer = player;
-        player.attachMediaElement(video);
-        player.load();
-        player.play().catch(e => console.warn('[fallback] play block:', e));
-
-        player.on(mpegts.Events.ERROR, (type, detail, info) => {
-          console.error('[fallback-mpegts-event] ERROR:', type, detail);
-          fail('Transcoding failed — stream unreadable');
-        });
+    player.on(mpegts.Events.ERROR, (type, detail, info) => {
+      console.log(`[mpegts-event] ERROR: type=${type}, detail=${detail}, info=`, info);
+      if (type === mpegts.ErrorTypes.NETWORK_ERROR) {
+        handleMpegtsRestart();
       } else {
-        fail('Transcoding failed — MSE not supported');
+        console.error('mpegts OTHER_ERROR:', detail);
+        fail('Playback error — stream may be offline or blocked');
       }
-    }, 0);
+    });
+
+    // Attach native video error listener for decoder crashes
+    const onNativeVideoError = () => {
+      console.warn('[mpegts-native-error] video error fired, attempting restart...');
+      handleMpegtsRestart();
+    };
+    state._nativeErrorListener = onNativeVideoError;
+    video.addEventListener('error', onNativeVideoError, { once: true });
+
+    player.attachMediaElement(video);
+    player.load();
+    player.play().catch(e => console.warn('mpegts play block:', e));
+
+    // 25-second loading timeout
+    state._loadTimer = setTimeout(() => {
+      if (video.readyState < 3) {
+        fail('Connection timeout — stream not loading');
+      }
+    }, 25000);
+  } else {
+    fail('MSE not supported by this browser');
   }
-
-  // Defer both old player destruction and new player setup to prevent race conditions on the video element
-  setTimeout(() => {
-    if (oldHls) {
-      try { oldHls.destroy(); } catch (e) {}
-    }
-    if (oldMpegtsPlayer) {
-      try { oldMpegtsPlayer.unload(); } catch (e) {}
-      try { oldMpegtsPlayer.detachMediaElement(); } catch (e) {}
-      try { oldMpegtsPlayer.destroy(); } catch (e) {}
-    }
-
-    video.removeAttribute('src');
-    try { video.load(); } catch (e) {}
-
-    let proxyUrl = '/api/stream-proxy?url=' + encodeURIComponent(channel.streamUrl);
-    if (channel.referrer) {
-      proxyUrl += '&referer=' + encodeURIComponent(channel.referrer);
-    }
-    if (channel.userAgent) {
-      proxyUrl += '&userAgent=' + encodeURIComponent(channel.userAgent);
-    }
-    setStatus('Loading…');
-
-    const isHls = channel.streamUrl.includes('.m3u8') || channel.streamUrl.includes('.m3u');
-
-    // Setup video element status polling every 2s
-    state._pollTimer = setInterval(() => {
-      let bufferedStr = 'none';
-      if (video.buffered && video.buffered.length > 0) {
-        bufferedStr = video.buffered.end(0).toFixed(2);
-      }
-      let errorStr = 'none';
-      if (video.error) {
-        errorStr = `code=${video.error.code}, message=${video.error.message}`;
-      }
-      console.log(`[video-poll] currentTime=${video.currentTime.toFixed(2)}, readyState=${video.readyState}, bufferedEnd=${bufferedStr}, error=${errorStr}`);
-    }, 2000);
-
-    if (isHls && Hls.isSupported()) {
-      const hls = new Hls({ maxBufferLength: 30 });
-      state.hls = hls;
-      hls.loadSource(proxyUrl);
-      hls.attachMedia(video);
-      hls.on(Hls.Events.MANIFEST_PARSED, () => { 
-        setStatus(''); 
-        video.play().catch(() => {}); 
-        
-        // Populate quality levels
-        const levels = hls.levels;
-        if (levels && levels.length >= 1) {
-          qSelect.innerHTML = '<option value="-1">Auto</option>';
-          levels.forEach((level, index) => {
-            const name = level.name || (level.height ? `${level.height}p` : `Level ${index}`);
-            const opt = document.createElement('option');
-            opt.value = index;
-            opt.textContent = name;
-            qSelect.appendChild(opt);
-          });
-          document.getElementById('quality-selector-wrap').style.display = 'block';
-        }
-      });
-      hls.on(Hls.Events.ERROR, (event, data) => {
-        if (!data.fatal) return;
-        if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-          const code = data.response && data.response.code;
-          if (code === 403) return fail("This channel is blocking automated access");
-          if (code === 504) return fail("This channel's server isn't responding");
-          hls.startLoad();
-        } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
-          hls.destroy(); state.hls = null;
-          setStatus('Transcoding…');
-          video.src = proxyUrl + '&transcode=true';
-          video.play().catch(() => fail('Failed to load: no supported source found'));
-        } else {
-          fail('Playback failed: ' + data.type);
-        }
-      });
-    } else if (isHls && video.canPlayType('application/vnd.apple.mpegurl')) {
-      video.src = proxyUrl;
-      video.addEventListener('loadedmetadata', () => { setStatus(''); video.play().catch(() => {}); });
-    } else {
-      // Non-HLS: try mpegts.js first
-      qSelect.innerHTML = `
-        <option value="direct">Source (Direct)</option>
-        <option value="transcode">Transcoded (Bypass)</option>
-      `;
-      document.getElementById('quality-selector-wrap').style.display = 'block';
-
-      if (mpegts.getFeatureList().mseLivePlayback) {
-        let rawProxyUrl = '/api/stream-proxy-raw?url=' + encodeURIComponent(channel.streamUrl);
-        if (channel.referrer) rawProxyUrl += '&referer=' + encodeURIComponent(channel.referrer);
-        if (channel.userAgent) rawProxyUrl += '&userAgent=' + encodeURIComponent(channel.userAgent);
-
-        const player = mpegts.createPlayer({
-          type: 'mpegts',
-          isLive: true,
-          url: rawProxyUrl
-        });
-        state.mpegtsPlayer = player;
-
-        // Add detailed mpegts.js event logging
-        player.on(mpegts.Events.ERROR, (type, detail, info) => {
-          console.log(`[mpegts-event] ERROR: type=${type}, detail=${detail}, info=`, info);
-          if (type === mpegts.ErrorTypes.NETWORK_ERROR) {
-            handleMpegtsRestart();
-          } else if (type === mpegts.ErrorTypes.MEDIA_ERROR) {
-            console.warn('mpegts MEDIA_ERROR, falling back to transcoding:', detail);
-            fallbackToTranscode();
-          } else {
-            console.error('mpegts OTHER_ERROR:', detail);
-            fail('Playback error — stream may be offline or blocked');
-          }
-        });
-        player.on(mpegts.Events.STATISTICS_INFO, (stats) => {
-          console.log(`[mpegts-event] STATISTICS_INFO: decodedFrames=${stats.decodedFrames}, droppedFrames=${stats.droppedFrames}, speed=${stats.speed} KB/s`);
-        });
-        player.on(mpegts.Events.MEDIA_INFO, (mediaInfo) => {
-          console.log('[mpegts-event] MEDIA_INFO:', mediaInfo);
-        });
-        player.on(mpegts.Events.METADATA_ARRIVED, (metadata) => {
-          console.log('[mpegts-event] METADATA_ARRIVED:', metadata);
-        });
-
-        // Attach native video error listener to trigger transcoding fallback on decoder crashes
-        const onNativeVideoError = () => {
-          console.warn('[mpegts-native-error] video error fired, falling back to transcoding:', video.error ? video.error.message : '');
-          fallbackToTranscode();
-        };
-        state._nativeErrorListener = onNativeVideoError;
-        video.addEventListener('error', onNativeVideoError, { once: true });
-
-        player.attachMediaElement(video);
-        player.load();
-        player.play().catch(e => console.warn('mpegts play block:', e));
-
-        // 25-second loading timeout
-        state._loadTimer = setTimeout(() => {
-          if (video.readyState < 3) {
-            fallbackToTranscode();
-          }
-        }, 25000);
-      } else {
-        fallbackToTranscode();
-      }
-    }
-  }, 0);
 }
 
 function changeQuality(val) {
-  if (state.hls) {
-    state.hls.currentLevel = parseInt(val, 10);
-    return;
-  }
-  
   const src = currentSource();
   const channel = src && src.channels.find(c => c.id === state.activeChannelId);
   if (!channel) return;
@@ -1038,6 +909,12 @@ function changeQuality(val) {
           type: 'mpegts',
           isLive: true,
           url: proxyUrl
+        }, {
+          enableWorker: true,
+          enableStashBuffer: true,
+          stashInitialSize: 524288, // 512KB startup buffer
+          lazyLoad: false,
+          liveBufferLatencyChasing: false
         });
         state.mpegtsPlayer = player;
         player.attachMediaElement(video);
@@ -1065,6 +942,12 @@ function changeQuality(val) {
           type: 'mpegts',
           isLive: true,
           url: rawProxyUrl
+        }, {
+          enableWorker: true,
+          enableStashBuffer: true,
+          stashInitialSize: 524288, // 512KB startup buffer
+          lazyLoad: false,
+          liveBufferLatencyChasing: false
         });
         state.mpegtsPlayer = player;
 
@@ -1073,11 +956,6 @@ function changeQuality(val) {
           console.log(`[mpegts-event] ERROR: type=${type}, detail=${detail}, info=`, info);
           if (type === mpegts.ErrorTypes.NETWORK_ERROR) {
             playChannel(state.activeSourceId, state.activeChannelId);
-          } else if (type === mpegts.ErrorTypes.MEDIA_ERROR) {
-            console.warn('[mpegts-event] MEDIA_ERROR, falling back to transcoding:', detail);
-            const qSelect = document.getElementById('quality-select');
-            if (qSelect) qSelect.value = 'transcode';
-            changeQuality('transcode');
           } else {
             console.error('[mpegts-event] OTHER_ERROR:', detail);
             setStatus('');
@@ -1087,22 +965,6 @@ function changeQuality(val) {
         player.on(mpegts.Events.STATISTICS_INFO, (stats) => {
           console.log(`[mpegts-event] STATISTICS_INFO: decodedFrames=${stats.decodedFrames}, droppedFrames=${stats.droppedFrames}, speed=${stats.speed} KB/s`);
         });
-        player.on(mpegts.Events.MEDIA_INFO, (mediaInfo) => {
-          console.log('[mpegts-event] MEDIA_INFO:', mediaInfo);
-        });
-        player.on(mpegts.Events.METADATA_ARRIVED, (metadata) => {
-          console.log('[mpegts-event] METADATA_ARRIVED:', metadata);
-        });
-
-        // Attach native video error listener for decoder failures
-        const onNativeVideoError = () => {
-          console.warn('[mpegts-native-error] video error fired, falling back to transcoding:', video.error ? video.error.message : '');
-          const qSelect = document.getElementById('quality-select');
-          if (qSelect) qSelect.value = 'transcode';
-          changeQuality('transcode');
-        };
-        state._nativeErrorListener = onNativeVideoError;
-        video.addEventListener('error', onNativeVideoError, { once: true });
 
         player.attachMediaElement(video);
         player.load();
