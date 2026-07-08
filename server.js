@@ -431,8 +431,13 @@ function spawnFfmpeg(url, audioCopy, headersStr) {
     );
   } else {
     args.push(
-      '-c:v', 'copy',
-      '-c:a', 'aac', '-b:a', '128k'
+      '-c:v', 'libx264',
+      '-preset', 'ultrafast',
+      '-tune', 'zerolatency',
+      '-crf', '28',
+      '-vf', 'scale=-2:720,format=yuv420p',
+      '-c:a', 'aac',
+      '-b:a', '128k'
     );
   }
 
