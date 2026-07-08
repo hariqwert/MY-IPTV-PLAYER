@@ -934,7 +934,7 @@ function changeQuality(val) {
       // direct quality (use mpegts.js if supported)
       setStatus('Loading…');
       if (mpegts.getFeatureList().mseLivePlayback) {
-        let rawProxyUrl = window.location.origin + '/api/stream-proxy-raw?url=' + encodeURIComponent(channel.streamUrl);
+        let rawProxyUrl = window.location.origin + '/api/internal-stream?url=' + encodeURIComponent(channel.streamUrl);
         if (channel.referrer) rawProxyUrl += '&referer=' + encodeURIComponent(channel.referrer);
         if (channel.userAgent) rawProxyUrl += '&userAgent=' + encodeURIComponent(channel.userAgent);
         

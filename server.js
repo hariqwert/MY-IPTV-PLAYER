@@ -295,7 +295,6 @@ app.get('/api/internal-stream', async (req, res) => {
   res.setHeader('Content-Type', 'video/mp2t');
   res.setHeader('Access-Control-Allow-Origin', '*');
 
-  let totalBytesStreamed = 0;
   let activeStream = null;
   let isClosed = false;
 
@@ -308,13 +307,8 @@ app.get('/api/internal-stream', async (req, res) => {
     if (isClosed) return;
 
     try {
-      const currentHeaders = {
-        ...headers,
-        ...(totalBytesStreamed > 0 ? { 'Range': `bytes=${totalBytesStreamed}-` } : {})
-      };
-
-      console.log(`[internal-stream] Connecting to upstream: ${streamUrl} (offset: ${totalBytesStreamed} bytes)`);
-      const response = await getStreamWithRedirects(streamUrl, currentHeaders);
+      console.log(`[internal-stream] Connecting to upstream: ${streamUrl}`);
+      const response = await getStreamWithRedirects(streamUrl, headers);
       if (isClosed) {
         try { response.data.destroy(); } catch (e) {}
         return;
@@ -324,7 +318,6 @@ app.get('/api/internal-stream', async (req, res) => {
 
       activeStream.on('data', (chunk) => {
         if (!isClosed) {
-          totalBytesStreamed += chunk.length;
           const writeOk = res.write(chunk);
           if (!writeOk) {
             activeStream.pause();
@@ -347,10 +340,6 @@ app.get('/api/internal-stream', async (req, res) => {
     } catch (err) {
       console.error('[internal-stream] Upstream connection failure, retrying:', err.message);
       if (isClosed) return;
-      if (err.response && err.response.status === 416) {
-        console.warn('[internal-stream] Range not satisfiable (416). Resetting byte offset to 0.');
-        totalBytesStreamed = 0;
-      }
       setTimeout(startStreaming, 1000); // Retry in 1000ms
     }
   }
@@ -452,10 +441,10 @@ function spawnFfmpeg(url, audioCopy, headersStr) {
       '-preset', 'ultrafast',
       '-tune', 'zerolatency',
       '-crf', '28',
-      '-vf', 'scale=-2:720,format=yuv420p',
+      '-vf', 'scale=-2:720,format=yuv420p,setpts=if(eq(N\\,0)\\,PTS\\,if(gt(PTS\\,PREV_OUT_PTS)\\,PTS\\,nan))',
       '-c:a', 'aac',
       '-b:a', '128k',
-      '-af', 'aresample=async=1'
+      '-af', 'aresample=async=1,asetpts=if(eq(N\\,0)\\,PTS\\,if(gt(PTS\\,PREV_OUT_PTS)\\,PTS\\,nan))'
     );
   }
 
@@ -552,97 +541,6 @@ app.get('/api/stream-proxy', async (req, res) => {
     cleanup();
     if (!gotData && code !== 0 && !res.headersSent) {
       res.status(502).send('Transcoding failed');
-    } else {
-      if (!res.writableEnded) res.end();
-    }
-  });
-});
-
-app.get('/api/stream-proxy-raw', async (req, res) => {
-  const streamUrl = req.query.url;
-  const referer = req.query.referer || req.query.referrer;
-  const userAgentParam = req.query.userAgent || req.query.useragent;
-
-  if (!streamUrl || typeof streamUrl !== 'string') {
-    return res.status(400).send('Missing url parameter');
-  }
-
-  const abortController = new AbortController();
-  let clientDisconnected = false;
-
-  req.on('close', () => {
-    clientDisconnected = true;
-    abortController.abort();
-  });
-
-  const headers = {
-    'User-Agent': userAgentParam || 'VLC/3.0.18 LibVLC/3.0.18',
-    'Accept': '*/*',
-    ...(referer ? { 'Referer': referer } : {})
-  };
-
-  const isHls = streamUrl.toLowerCase().includes('.m3u8') || streamUrl.toLowerCase().includes('.m3u') || streamUrl.toLowerCase().includes('/hls/');
-
-  let inputUrl;
-  let headersStr = null;
-
-  if (isHls) {
-    inputUrl = streamUrl;
-    headersStr = '';
-    if (referer) headersStr += `Referer: ${referer}\r\n`;
-    if (userAgentParam) headersStr += `User-Agent: ${userAgentParam}\r\n`;
-    else headersStr += `User-Agent: VLC/3.0.18 LibVLC/3.0.18\r\n`;
-    console.log('[proxy-raw] Spawning ffmpeg copy remuxer with direct HLS URL:', inputUrl);
-  } else {
-    inputUrl = `http://localhost:${PORT}/api/internal-stream?url=${encodeURIComponent(streamUrl)}&referer=${encodeURIComponent(referer || '')}&userAgent=${encodeURIComponent(userAgentParam || '')}`;
-    console.log('[proxy-raw] Spawning ffmpeg copy remuxer with loopback URL:', inputUrl);
-  }
-
-  const ffmpeg = spawnFfmpeg(inputUrl, true, headersStr);
-
-  if (res.socket) res.socket.setNoDelay(true);
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Content-Type', 'video/mp2t'); // Output MPEG-TS to client
-  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-  res.setHeader('Pragma', 'no-cache');
-  res.setHeader('Expires', '0');
-
-  let stderrBuf = '';
-  ffmpeg.stderr.on('data', (d) => {
-    const msg = d.toString();
-    stderrBuf += msg;
-    console.log(`[ffmpeg-raw-stderr] ${msg.trim()}`);
-  });
-
-  let gotData = false;
-  ffmpeg.stdout.pipe(res);
-
-  ffmpeg.stdout.on('data', () => {
-    gotData = true;
-  });
-
-  const startupTimer = setTimeout(() => {
-    if (!gotData) {
-      console.error('[ffmpeg-raw] startup timeout — no data after 15 seconds');
-      console.error('[ffmpeg-raw] startup stderr log:\n', stderrBuf);
-      cleanup();
-      if (!res.headersSent) res.status(504).send('Stream timeout');
-      else res.destroy();
-    }
-  }, FFMPEG_STARTUP_TIMEOUT_MS);
-
-  const cleanup = () => {
-    clearTimeout(startupTimer);
-    try { ffmpeg.kill('SIGKILL'); } catch (e) {}
-  };
-
-  req.on('close', cleanup);
-
-  ffmpeg.on('close', (code) => {
-    console.log(`[proxy-raw-ffmpeg] Process exited with code ${code}`);
-    cleanup();
-    if (!gotData && code !== 0 && !res.headersSent) {
-      res.status(502).send('Streaming failed');
     } else {
       if (!res.writableEnded) res.end();
     }
