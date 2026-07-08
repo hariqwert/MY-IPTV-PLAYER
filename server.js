@@ -276,206 +276,29 @@ function withIdleTimeout(stream, onTimeout) {
   stream.on('close', clear);
 }
 
-app.get('/api/internal-stream', async (req, res) => {
-  const streamUrl = req.query.url;
-  const referer = req.query.referer || req.query.referrer;
-  const userAgentParam = req.query.userAgent || req.query.useragent;
 
-  if (!streamUrl || typeof streamUrl !== 'string') {
-    return res.status(400).send('Missing url parameter');
+const crypto = require('crypto');
+const hlsSessions = new Map();
+const HLS_TEMP_DIR = path.join(__dirname, 'public', 'hls_temp');
+
+// Ensure HLS temp directory exists and is clean on boot
+if (fs.existsSync(HLS_TEMP_DIR)) {
+  try {
+    fs.rmSync(HLS_TEMP_DIR, { recursive: true, force: true });
+  } catch (e) {
+    console.error('[hls] Error cleaning temp dir on boot:', e.message);
   }
+}
+fs.mkdirSync(HLS_TEMP_DIR, { recursive: true });
 
-  const ua = userAgentParam || 'VLC/3.0.18 LibVLC/3.0.18';
-  const headers = {
-    'User-Agent': ua,
-    'Accept': '*/*',
-    ...(referer ? { 'Referer': referer } : {})
-  };
-
-  res.setHeader('Content-Type', 'video/mp2t');
-  res.setHeader('Access-Control-Allow-Origin', '*');
-
-  let activeStream = null;
-  let isClosed = false;
-
-  // Real-time MPEG-TS PCR filter state to drop duplicate reconnect bursts in Direct Play
-  let mpegTsBuffer = Buffer.alloc(0);
-  let maxPcrBase = -1;
-  let dropping = false;
-  let isMpegTs = null; // null = checking, true = yes, false = no
-  let bytesChecked = 0;
-  let lastConnectTime = 0;
-
-  function filterMpegTsChunks(chunk) {
-    mpegTsBuffer = Buffer.concat([mpegTsBuffer, chunk]);
-    const packets = [];
-    const now = Date.now();
-    const timeSinceConnect = now - lastConnectTime;
-    
-    // Safety: Force disable dropping after 4 seconds of connection to prevent permanent lockups
-    if (dropping && timeSinceConnect > 4000) {
-      console.log('[pcr-filter] Reconnect burst window expired. Forcing resume.');
-      dropping = false;
-    }
-    
-    while (mpegTsBuffer.length >= 188) {
-      if (mpegTsBuffer[0] !== 0x47) {
-        let syncIndex = mpegTsBuffer.indexOf(0x47);
-        if (syncIndex === -1) {
-          mpegTsBuffer = Buffer.alloc(0);
-          break;
-        }
-        mpegTsBuffer = mpegTsBuffer.slice(syncIndex);
-        if (mpegTsBuffer.length < 188) break;
-      }
-      
-      const packet = mpegTsBuffer.slice(0, 188);
-      mpegTsBuffer = mpegTsBuffer.slice(188);
-      
-      const adaptationFieldControl = (packet[3] & 0x30) >> 4;
-      let hasPcr = false;
-      let pcrBase = -1;
-      
-      if (adaptationFieldControl === 2 || adaptationFieldControl === 3) {
-        const adaptationFieldLength = packet[4];
-        if (adaptationFieldLength > 0) {
-          const flags = packet[5];
-          const pcrFlag = (flags & 0x10) >> 4;
-          if (pcrFlag === 1) {
-            hasPcr = true;
-            const b0 = packet[6];
-            const b1 = packet[7];
-            const b2 = packet[8];
-            const b3 = packet[9];
-            const b4 = packet[10];
-            pcrBase = (b0 * 256 + b1) * 65536 * 256 + (b2 << 16) + (b3 << 8) + (b4 >> 7);
-          }
-        }
-      }
-      
-      if (hasPcr) {
-        if (maxPcrBase === -1) {
-          maxPcrBase = pcrBase;
-          dropping = false;
-        } else {
-          if (dropping && timeSinceConnect <= 4000) {
-            if (pcrBase >= maxPcrBase) {
-              console.log(`[pcr-filter] Reconnect burst caught up: PCR Base advanced to ${pcrBase} (max: ${maxPcrBase}). Resuming packet write.`);
-              dropping = false;
-              maxPcrBase = pcrBase;
-            }
-          } else {
-            if (pcrBase < maxPcrBase) {
-              const gap = maxPcrBase - pcrBase;
-              // Only drop if it is a major backward jump (>0.5s) within the first 4s window
-              if (gap > 45000 && timeSinceConnect <= 4000) {
-                console.log(`[pcr-filter] Loop detected: PCR Base went back from ${maxPcrBase} to ${pcrBase} (gap: ${gap} ticks). Dropping duplicate packets.`);
-                dropping = true;
-              }
-            } else {
-              maxPcrBase = pcrBase;
-            }
-          }
-        }
-      }
-      
-      if (!dropping) {
-        packets.push(packet);
-      }
-    }
-    
-    return packets.length > 0 ? Buffer.concat(packets) : null;
+// Middleware to track session activity on files served under /hls_temp
+app.use('/hls_temp/:streamId', (req, res, next) => {
+  const { streamId } = req.params;
+  const session = hlsSessions.get(streamId);
+  if (session) {
+    session.lastRequestTime = Date.now();
   }
-
-  req.on('close', () => {
-    isClosed = true;
-    cleanupActiveStream();
-  });
-
-  async function startStreaming() {
-    if (isClosed) return;
-
-    try {
-      console.log(`[internal-stream] Connecting to upstream: ${streamUrl}`);
-      const response = await getStreamWithRedirects(streamUrl, headers);
-      if (isClosed) {
-        try { response.data.destroy(); } catch (e) {}
-        return;
-      }
-
-      activeStream = response.data;
-      lastConnectTime = Date.now();
-      
-      // If we had a previous maxPcrBase, start in dropping mode to drop the cached burst
-      if (maxPcrBase !== -1) {
-        dropping = true;
-      }
-
-      activeStream.on('data', (chunk) => {
-        if (!isClosed) {
-          if (isMpegTs === null) {
-            bytesChecked += chunk.length;
-            if (chunk.indexOf(0x47) !== -1) {
-              isMpegTs = true;
-            } else if (bytesChecked > 500 * 1024) {
-              console.log('[internal-stream] Stream does not appear to be MPEG-TS. Bypassing PCR filter.');
-              isMpegTs = false;
-            }
-          }
-
-          if (isMpegTs === false) {
-            const writeOk = res.write(chunk);
-            if (!writeOk) {
-              activeStream.pause();
-            }
-          } else {
-            const filtered = filterMpegTsChunks(chunk);
-            if (filtered) {
-              const writeOk = res.write(filtered);
-              if (!writeOk) {
-                activeStream.pause();
-              }
-            }
-          }
-        }
-      });
-
-      activeStream.on('end', () => {
-        console.log('[internal-stream] Upstream ended cleanly. Reconnecting in 1000ms...');
-        cleanupActiveStream();
-        setTimeout(startStreaming, 1000); // Back off to 1000ms
-      });
-
-      activeStream.on('error', (err) => {
-        console.warn('[internal-stream] Upstream error, reconnecting in 1500ms:', err.message);
-        cleanupActiveStream();
-        setTimeout(startStreaming, 1500); // Back off to 1500ms
-      });
-
-    } catch (err) {
-      console.error('[internal-stream] Upstream connection failure, retrying:', err.message);
-      if (isClosed) return;
-      setTimeout(startStreaming, 1500); // Retry in 1500ms
-    }
-  }
-
-  res.on('drain', () => {
-    if (activeStream && activeStream.isPaused()) {
-      activeStream.resume();
-    }
-  });
-
-  function cleanupActiveStream() {
-    if (activeStream) {
-      activeStream.removeAllListeners('data');
-      activeStream.removeAllListeners('end');
-      activeStream.removeAllListeners('error');
-      try { activeStream.destroy(); } catch (e) {}
-      activeStream = null;
-    }
-  }
-
-  startStreaming();
+  next();
 });
 
 async function resolveRedirects(urlStr, headers) {
@@ -524,55 +347,10 @@ async function resolveRedirects(urlStr, headers) {
   return currentUrl;
 }
 
-function spawnFfmpeg(url, audioCopy, headersStr) {
-  const args = [];
-  if (headersStr) {
-    args.push('-headers', headersStr);
-  }
 
-  const isHls = url.toLowerCase().includes('.m3u8') || url.toLowerCase().includes('.m3u') || url.toLowerCase().includes('/hls/');
-  if (isHls) {
-    args.push('-live_start_index', '-3');
-  }
-
-  args.push(
-    '-fflags', '+genpts+igndts+discardcorrupt',
-    '-correct_ts_overflow', '1',
-    '-avoid_negative_ts', 'make_zero',
-    '-flags', '+global_header',
-    '-analyzeduration', '1000000',
-    '-probesize', '1000000',
-    '-i', url
-  );
-
-  if (audioCopy) {
-    args.push(
-      '-c:v', 'copy',
-      '-c:a', 'copy'
-    );
-  } else {
-    args.push(
-      '-c:v', 'libx264',
-      '-preset', 'ultrafast',
-      '-tune', 'zerolatency',
-      '-crf', '28',
-      '-vf', 'scale=-2:720,format=yuv420p,setpts=if(eq(N\\,0)\\,PTS\\,if(gt(PTS\\,PREV_OUTPTS)\\,PTS\\,nan))',
-      '-c:a', 'aac',
-      '-b:a', '128k',
-      '-af', 'aresample=async=1,asetpts=if(eq(N\\,0)\\,PTS\\,if(gt(PTS\\,PREV_OUTPTS)\\,PTS\\,nan))'
-    );
-  }
-
-  args.push(
-    '-f', 'mpegts',
-    'pipe:1'
-  );
-
-  return spawn(FFMPEG, args);
-}
-
-app.get('/api/stream-proxy', async (req, res) => {
+app.get('/api/stream/start', async (req, res) => {
   const streamUrl = req.query.url;
+  const mode = req.query.mode || 'transcode'; // 'transcode' or 'copy'
   const referer = req.query.referer || req.query.referrer;
   const userAgentParam = req.query.userAgent || req.query.useragent;
 
@@ -580,86 +358,149 @@ app.get('/api/stream-proxy', async (req, res) => {
     return res.status(400).send('Missing url parameter');
   }
 
-  const abortController = new AbortController();
-  let clientDisconnected = false;
-
-  req.on('close', () => {
-    clientDisconnected = true;
-    abortController.abort();
-  });
-
   const headers = {
     'User-Agent': userAgentParam || 'VLC/3.0.18 LibVLC/3.0.18',
     'Accept': '*/*',
     ...(referer ? { 'Referer': referer } : {})
   };
 
-  const isHls = streamUrl.toLowerCase().includes('.m3u8') || streamUrl.toLowerCase().includes('.m3u') || streamUrl.toLowerCase().includes('/hls/');
+  try {
+    const resolvedUrl = await resolveRedirects(streamUrl, headers);
+    const isHls = resolvedUrl.toLowerCase().includes('.m3u8') || resolvedUrl.toLowerCase().includes('.m3u') || resolvedUrl.toLowerCase().includes('/hls/');
 
-  let inputUrl;
-  let headersStr = null;
+    if (isHls) {
+      console.log('[hls] Stream is already HLS. Directing player to resolved URL:', resolvedUrl);
+      return res.json({ manifestUrl: resolvedUrl, streamId: null });
+    }
 
-  if (isHls) {
-    inputUrl = streamUrl;
-    headersStr = '';
+    const streamId = crypto.randomBytes(8).toString('hex');
+    const segmentDir = path.join(HLS_TEMP_DIR, streamId);
+    fs.mkdirSync(segmentDir, { recursive: true });
+    const manifestPath = path.join(segmentDir, 'index.m3u8');
+
+    let headersStr = '';
     if (referer) headersStr += `Referer: ${referer}\r\n`;
     if (userAgentParam) headersStr += `User-Agent: ${userAgentParam}\r\n`;
     else headersStr += `User-Agent: VLC/3.0.18 LibVLC/3.0.18\r\n`;
-    console.log('[proxy] Spawning ffmpeg transcoder with direct HLS URL:', inputUrl);
-  } else {
-    inputUrl = `http://localhost:${PORT}/api/internal-stream?url=${encodeURIComponent(streamUrl)}&referer=${encodeURIComponent(referer || '')}&userAgent=${encodeURIComponent(userAgentParam || '')}`;
-    console.log('[proxy] Spawning ffmpeg transcoder with loopback URL:', inputUrl);
-  }
 
-  const ffmpeg = spawnFfmpeg(inputUrl, false, headersStr);
-
-  if (res.socket) res.socket.setNoDelay(true);
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Content-Type', 'video/mp2t'); // Output MPEG-TS to client
-  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-  res.setHeader('Pragma', 'no-cache');
-  res.setHeader('Expires', '0');
-
-  let stderrBuf = '';
-  ffmpeg.stderr.on('data', (d) => {
-    const msg = d.toString();
-    stderrBuf += msg;
-    console.log(`[ffmpeg-stderr] ${msg.trim()}`);
-  });
-
-  let gotData = false;
-  ffmpeg.stdout.pipe(res);
-
-  ffmpeg.stdout.on('data', () => {
-    gotData = true;
-  });
-
-  const startupTimer = setTimeout(() => {
-    if (!gotData) {
-      console.error('[ffmpeg] startup timeout — no data after 15 seconds');
-      console.error('[ffmpeg] startup stderr log:\n', stderrBuf);
-      cleanup();
-      if (!res.headersSent) res.status(504).send('Stream timeout');
-      else res.destroy();
+    const args = [];
+    if (headersStr) {
+      args.push('-headers', headersStr);
     }
-  }, FFMPEG_STARTUP_TIMEOUT_MS);
 
-  const cleanup = () => {
-    clearTimeout(startupTimer);
-    try { ffmpeg.kill('SIGKILL'); } catch (e) {}
-  };
+    args.push(
+      '-fflags', '+genpts+igndts+discardcorrupt',
+      '-correct_ts_overflow', '1',
+      '-avoid_negative_ts', 'make_zero',
+      '-flags', '+global_header',
+      '-analyzeduration', '1000000',
+      '-probesize', '1000000',
+      '-i', resolvedUrl
+    );
 
-  req.on('close', cleanup);
-
-  ffmpeg.on('close', (code) => {
-    console.log(`[proxy-ffmpeg] Process exited with code ${code}`);
-    cleanup();
-    if (!gotData && code !== 0 && !res.headersSent) {
-      res.status(502).send('Transcoding failed');
+    if (mode === 'copy') {
+      args.push(
+        '-c:v', 'copy',
+        '-c:a', 'copy'
+      );
     } else {
-      if (!res.writableEnded) res.end();
+      args.push(
+        '-c:v', 'libx264',
+        '-preset', 'ultrafast',
+        '-tune', 'zerolatency',
+        '-crf', '28',
+        '-vf', 'scale=-2:720,format=yuv420p',
+        '-c:a', 'aac',
+        '-b:a', '128k'
+      );
     }
-  });
+
+    args.push(
+      '-f', 'hls',
+      '-hls_time', '2',
+      '-hls_list_size', '5',
+      '-hls_flags', 'delete_segments',
+      '-hls_segment_type', 'mpegts',
+      '-hls_segment_filename', path.join(segmentDir, 'seg_%d.ts'),
+      manifestPath
+    );
+
+    console.log(`[hls] Spawning FFmpeg HLS segmenter (mode: ${mode}) for session ${streamId}`);
+    const ffmpegProcess = spawn(FFMPEG, args);
+
+    ffmpegProcess.stderr.on('data', (d) => {
+      // Un-comment to trace ffmpeg status output in console
+      // console.log(`[ffmpeg-hls-stderr-${streamId}] ${d.toString().trim()}`);
+    });
+
+    const session = {
+      ffmpegProcess,
+      tempDir: segmentDir,
+      lastRequestTime: Date.now(),
+      manifestPath
+    };
+    hlsSessions.set(streamId, session);
+
+    // Wait until index.m3u8 is actually created before responding to player
+    let checks = 0;
+    const checkTimer = setInterval(() => {
+      checks++;
+      if (fs.existsSync(manifestPath)) {
+        clearInterval(checkTimer);
+        return res.json({ manifestUrl: `/hls_temp/${streamId}/index.m3u8`, streamId });
+      }
+      if (checks > 75) { // 15 seconds timeout
+        clearInterval(checkTimer);
+        try { ffmpegProcess.kill('SIGKILL'); } catch (e) {}
+        try { fs.rmSync(segmentDir, { recursive: true, force: true }); } catch (e) {}
+        hlsSessions.delete(streamId);
+        if (!res.headersSent) {
+          return res.status(504).send('FFmpeg failed to generate HLS manifest in time');
+        }
+      }
+    }, 200);
+
+  } catch (err) {
+    console.error('[hls] Failed to start stream:', err.message);
+    if (!res.headersSent) {
+      res.status(500).send('Failed to initialize playback session');
+    }
+  }
 });
+
+app.post('/api/stream/stop', (req, res) => {
+  const { streamId } = req.body;
+  if (!streamId) {
+    return res.status(400).send('Missing streamId');
+  }
+  const session = hlsSessions.get(streamId);
+  if (session) {
+    console.log(`[hls] Stopping session ${streamId}`);
+    cleanupSession(streamId, session);
+  }
+  res.sendStatus(200);
+});
+
+function cleanupSession(streamId, session) {
+  try {
+    session.ffmpegProcess.kill('SIGKILL');
+  } catch (e) {}
+  try {
+    fs.rmSync(session.tempDir, { recursive: true, force: true });
+  } catch (e) {}
+  hlsSessions.delete(streamId);
+}
+
+// Background Garbage Collector to clean up inactive HLS directories
+setInterval(() => {
+  const now = Date.now();
+  for (const [streamId, session] of hlsSessions.entries()) {
+    const idleTime = now - session.lastRequestTime;
+    if (idleTime > 30000) { // 30 seconds idle timeout
+      console.log(`[hls-gc] Cleaning up idle session ${streamId} (idle for ${Math.round(idleTime / 1000)}s)`);
+      cleanupSession(streamId, session);
+    }
+  }
+}, 10000);
 
 app.listen(PORT, () => console.log(`IPTV player running at http://localhost:${PORT}`));
